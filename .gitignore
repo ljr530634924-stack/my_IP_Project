@@ -1,0 +1,27 @@
+# ======================
+# Python cache
+# ======================
+__pycache__/
+*.pyc
+*.pyo
+
+# ======================
+# Virtual environment
+# ======================
+venv/
+.env/
+
+# ======================
+# Images (if not needed)
+# ======================
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tiff
+*.tif
+# ======================
+# Other common junk
+# ======================
+.DS_Store
+Thumbs.db
