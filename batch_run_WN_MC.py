@@ -14,7 +14,7 @@ Image.MAX_IMAGE_PIXELS = None
 
 # --- Configuration ---
 # Set this to the folder containing your images.
-INPUT_FOLDER = r"\\nas.ads.mwn.de\tuei\mml\MML MS BS students\Bachelor Students\Jinrui\CRP\Project002_CRP_ELISA_DirectBinding_qCAP_VaryingBiotin0,0.1,1,10mg (3images again)"
+INPUT_FOLDER = r"F:\Jinrui\1mgBiotin_30mgSVA_100ugAb488_10ugBiotinAb488"
 
 # Refined extraction parameters (Structure)
 CIRCLE_RADIUS_SCALE = 1
@@ -68,10 +68,56 @@ def process_pair(ch00_path, ch01_path):
 
         # 2. Find Notches and Axes
         print("  2. Finding notches and axes...")
+        temp_axes_path = os.path.join(directory, f"temp_axes_{prefix}.png")
         axes_info = find_notches_and_axes(
             structure_mask,
-            save_path=None,
+            save_path=temp_axes_path,
         )
+
+        # 2.1 Overlay axes on ch00 (Option 3: Black BG, Ch00 inside particles, Axes on top)
+        if os.path.exists(temp_axes_path):
+            print("  2.1 Generating overlay (Option 3)...")
+            overlay_output = os.path.join(directory, f"{prefix}_overlay_axes_ch00.png")
+            try:
+                axes_img = cv2.imread(temp_axes_path)
+                base_img = cv2.imread(ch00_path, cv2.IMREAD_UNCHANGED)
+
+                if axes_img is not None and base_img is not None:
+                    # Normalize base to 8-bit for visualization
+                    if base_img.dtype == np.uint16:
+                        p_lo, p_hi = np.percentile(base_img, (1, 99))
+                        if p_hi > p_lo:
+                            base_vis = (base_img.astype(np.float32) - p_lo) * (255.0 / (p_hi - p_lo))
+                            base_vis = np.clip(base_vis, 0, 255).astype(np.uint8)
+                        else:
+                            base_vis = (base_img / 256).astype(np.uint8)
+                    elif base_img.dtype == np.uint8:
+                        base_vis = base_img.copy()
+                    else:
+                        base_vis = cv2.normalize(base_img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+                    if len(base_vis.shape) == 2:
+                        base_vis = cv2.cvtColor(base_vis, cv2.COLOR_GRAY2BGR)
+
+                    if axes_img.shape[:2] != base_vis.shape[:2]:
+                        axes_img = cv2.resize(axes_img, (base_vis.shape[1], base_vis.shape[0]))
+
+                    # Detect white particle interior (255,255,255)
+                    gray_axes = cv2.cvtColor(axes_img, cv2.COLOR_BGR2GRAY)
+                    _, mask_white = cv2.threshold(gray_axes, 250, 255, cv2.THRESH_BINARY)
+
+                    # Composite: Start with axes_img (Black BG + Axes), replace white with base
+                    final_comp = axes_img.copy()
+                    final_comp[mask_white == 255] = base_vis[mask_white == 255]
+
+                    cv2.imwrite(overlay_output, final_comp)
+                    print(f"  -> Saved overlay: {overlay_output}")
+
+                os.remove(temp_axes_path)
+            except Exception as e:
+                print(f"  [WARN] Failed to generate overlay: {e}")
+                if os.path.exists(temp_axes_path):
+                    os.remove(temp_axes_path)
 
         # 3. Measure on raw ch01 using measurement circles
         print("  3. Measuring intensities...")

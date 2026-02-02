@@ -1,4 +1,4 @@
-import numpy as np
+﻿import numpy as np
 import matplotlib.pyplot as plt
 from skimage import io, filters, morphology, exposure, feature, measure
 from skimage.segmentation import watershed, find_boundaries
@@ -855,7 +855,10 @@ def find_inner_holes_contours(
     min_circularity=0.5,
     block_size=41,
     c_value=5,
-    debug=False  # 新增调试参数
+    erosion_size=0, # [New] 腐蚀大小 (iterations)，0表示不腐蚀
+    debug=False,  # 新增调试参数
+    detect_dark=True, # [New] True=检测暗孔(默认), False=检测亮斑
+    predict_4c=False # [New] 是否预测4个对称孔洞
 ):
     """
     针对每个粒子区域，分别寻找内部的4个孔洞。
@@ -879,10 +882,20 @@ def find_inner_holes_contours(
     labels = measure.label(structure_mask)
     regions = measure.regionprops(labels)
     
+    # [New] Sort regions by x-coordinate (centroid[1])
+    regions.sort(key=lambda x: x.centroid[1])
+    
     all_holes = []
+    all_4c_circles = [] # [New] 存储 (x, y, radius) 用于4C模式
+    all_centroids = [] # [New] 用于存储质心以便画蓝点
     
     # 2. 遍历每个粒子 (Per-Region Search)
-    for r in regions:
+    for idx, r in enumerate(regions):
+        pid = idx + 1
+        # [New] 计算质心 (仅用于可视化)
+        cy, cx = r.centroid
+        all_centroids.append((cx, cy, pid))
+
         # 获取 ROI
         minr, minc, maxr, maxc = r.bbox
         
@@ -894,18 +907,27 @@ def find_inner_holes_contours(
         # Step 2: 硬遮罩 (Overlay/Masking) - 只保留粒子内部
         masked_roi = cv2.bitwise_and(roi_img, roi_img, mask=roi_mask)
         
+        # [New] 腐蚀 Mask 以定义“安全区”，排除边缘干扰
+        if erosion_size > 0:
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            safe_mask = cv2.erode(roi_mask, kernel, iterations=erosion_size)
+        else:
+            safe_mask = roi_mask
+
         # Step 3: 寻找小圆
         # a. 高斯模糊
         blurred = cv2.GaussianBlur(masked_roi, (5, 5), 0)
         
         # b. 自适应阈值
+        # 如果检测暗孔，使用 INV (暗->白)；如果检测亮斑，使用 BINARY (亮->白)
+        thresh_type = cv2.THRESH_BINARY_INV if detect_dark else cv2.THRESH_BINARY
         thresh = cv2.adaptiveThreshold(
             blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV, block_size, c_value
+            thresh_type, block_size, c_value
         )
         
-        # 再次应用 mask 清理边界
-        thresh = cv2.bitwise_and(thresh, thresh, mask=roi_mask)
+        # [Modified] 应用 safe_mask 而不是 roi_mask，从而物理屏蔽边缘区域
+        thresh = cv2.bitwise_and(thresh, thresh, mask=safe_mask)
         
         # c. 形态学去噪
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -940,9 +962,35 @@ def find_inner_holes_contours(
                             'circularity': circularity
                         })
         
-        # e. 排序并取前4
+        # e. 排序并取前1 (只保留最圆的一个)
         candidates.sort(key=lambda x: x['circularity'], reverse=True)
-        all_holes.extend([c['center'] for c in candidates[:4]])
+        
+        if predict_4c:
+            if len(candidates) > 0:
+                best_center = candidates[0]['center'] # (x, y)
+                cy, cx = r.centroid # skimage returns (row, col) -> (y, x)
+                
+                # Vector from centroid to hole
+                vx = best_center[0] - cx
+                vy = best_center[1] - cy
+                
+                # Generate 4 points (0, 90, 180, 270 degrees)
+                # Note: y-axis is down in images. Rotation logic: (x, y) -> (-y, x)
+                pts = [
+                    (cx + vx, cy + vy),      # Original
+                    (cx - vy, cy + vx),      # 90 deg
+                    (cx - vx, cy - vy),      # 180 deg
+                    (cx + vy, cy - vx)       # 270 deg
+                ]
+                
+                # Radius = Diameter / 6 = (Minor Axis) / 6
+                radius = r.minor_axis_length / 6.0
+                if radius < 1: radius = 1
+                
+                for p in pts:
+                    all_4c_circles.append((p[0], p[1], radius))
+        else:
+            all_holes.extend([c['center'] for c in candidates[:1]])
 
     # 4. 生成结果图片 (无论是否保存，都生成以便返回)
     if image_gray.ndim == 2:
@@ -961,9 +1009,23 @@ def find_inner_holes_contours(
     mask_bool = structure_mask > 0
     final_vis[mask_bool] = vis_img[mask_bool]
 
+    # [New] 画蓝点 (质心)
+    for (cx, cy, pid) in all_centroids:
+        # 画大一点的蓝点 (半径 4 -> 6)
+        cv2.circle(final_vis, (int(cx), int(cy)), 6, (255, 0, 0), -1) 
+        # 改为白色文字 (255, 255, 255)，字体放大 (0.5 -> 1.5)，线条加粗 (1 -> 3)
+        cv2.putText(final_vis, str(pid), (int(cx)+15, int(cy)-15), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 2)
+
     # 画红点 (遍历到的所有孔洞)
     for pt in all_holes:
         cv2.circle(final_vis, (int(pt[0]), int(pt[1])), 4, (0, 0, 255), -1)
+        
+    # [New] 画 4C 圆圈 (红圈 + 中心点)
+    for (px, py, pr) in all_4c_circles:
+        # 画空心圆 (thickness=2)
+        cv2.circle(final_vis, (int(px), int(py)), int(pr), (255, 0, 0), 2)
+        # 画圆心实心点
+        cv2.circle(final_vis, (int(px), int(py)), 3, (0, 0, 255), -1)
 
     # 如果需要保存
     if save_path:
