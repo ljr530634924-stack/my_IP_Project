@@ -52,6 +52,7 @@ def compute_quadrant_intensity(
     # 3) circles per quadrant
     #Q1 is blue, Q2 is green, Q3 is purple, Q4 is yellow
     results = []
+    circles_to_draw = []
     color_map = {"Q1": (255, 0, 0), "Q2": (0, 255, 0), "Q3": (255, 0, 255), "Q4": (0, 255, 255)}
     offsets = {
         "Q1": (+1, +1),
@@ -114,16 +115,26 @@ def compute_quadrant_intensity(
             quadrant_means.append(mean_val)
             quadrant_areas.append(area_val)
 
+            circle_center_xy = (int(round(center[1])), int(round(center[0])))
+            circle_radius_int = int(round(radius))
+            circle_color = color_map[q_name]
+
             cv2.circle(
                 id_map,
-                (int(round(center[1])), int(round(center[0]))),  # (x, y)
-                int(round(radius)),
-                color_map[q_name],
+                circle_center_xy,  # (x, y)
+                circle_radius_int,
+                circle_color,
                 1,
                 cv2.LINE_AA,
             )
-
-        results.append([pid, *quadrant_means, *quadrant_areas])
+            circles_to_draw.append({
+                "center": circle_center_xy,
+                "radius": circle_radius_int,
+                "color": circle_color,
+                "thickness": 1,
+                "line_type": cv2.LINE_AA
+            })
+        results.append([pid, *quadrant_means, *quadrant_areas, r.area])
 
     # 4) write CSV
     mean_row = []
@@ -133,8 +144,8 @@ def compute_quadrant_intensity(
         mean_row = ["Mean"]
         sd_row = ["SD"]
         sem_row = ["Std. Error"]
-        # Columns 1 to 8 (Q1_Mean...Q4_Mean, Q1_Area...Q4_Area)
-        for col_idx in range(1, 9):
+        # Columns 1 to 9 (Q1_Mean...Q4_Mean, Q1_Area...Q4_Area, Particle_Area)
+        for col_idx in range(1, 10):
             col_vals = [row[col_idx] for row in results]
             valid_vals = [v for v in col_vals if not np.isnan(v)]
             if valid_vals:
@@ -163,7 +174,7 @@ def compute_quadrant_intensity(
 
     header = ["particle_id", 
               "Q1_Mean", "Q2_Mean", "Q3_Mean", "Q4_Mean", 
-              "Q1_Area", "Q2_Area", "Q3_Area", "Q4_Area"]
+              "Q1_Area", "Q2_Area", "Q3_Area", "Q4_Area", "Particle_Area"]
     
     # Write colored Excel
     _write_colored_xlsx(csv_path, header, results, footer_rows=footer_rows)
@@ -176,6 +187,8 @@ def compute_quadrant_intensity(
 
     print(f"[OK] quadrant table written: {csv_path}")
     print(f"[OK] id map saved: {id_map_path}")
+
+    return circles_to_draw
 
 
 def compute_masked_quadrant_intensity(
@@ -430,7 +443,7 @@ def compute_global_signal_intensity(
             contour[:, 1] += (minc - 1)
             # cv2.polylines expects (x,y) points
             pts = np.expand_dims(np.flip(contour, axis=1).astype(np.int32), axis=1)
-            cv2.drawContours(vis_img, [pts], -1, (0, 255, 0), 1)
+            cv2.drawContours(vis_img, [pts], -1, (0, 255, 0), 2)
 
     # Footer stats
     header = ["particle_id", "Mean_Signal_Intensity", "Signal_Area"]
@@ -582,3 +595,151 @@ def _write_colored_xlsx(path, headers, data_rows, footer_rows=None):
 
     wb.save(path)
     print(f"[OK] Colored Excel table saved: {path}")
+
+
+def compute_circles_intensity(
+    brightness_image,
+    circles_data,
+    particle_areas=None,
+    csv_path="circles_intensity.csv",
+    overlay_path="circles_visualization.png"
+):
+    """
+    Measure intensity in specific circles provided by circles_data.
+    circles_data format: { pid: [ (x, y, radius), (x, y, radius), ... ] }
+    """
+    h, w = brightness_image.shape
+
+    # 1. Prepare visualization base
+    min_val, max_val = brightness_image.min(), brightness_image.max()
+    if max_val > min_val:
+        display_base = 255.0 * (brightness_image - min_val) / (max_val - min_val)
+    else:
+        display_base = np.zeros_like(brightness_image)
+    vis_img = cv2.cvtColor(display_base.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+
+    results = []
+    
+    # Sort PIDs for consistent output
+    sorted_pids = sorted(circles_data.keys())
+    max_circles = 4 # Fixed to 4 for 4C method
+
+    for pid in sorted_pids:
+        circles = circles_data[pid]
+        
+        # [New] 1. 如果粒子没有测量圆，直接跳过（删除该行）
+        if not circles:
+            continue
+        
+        means = []
+        areas = []
+        
+        # Draw PID roughly near the first circle or centroid logic if available
+        # Here we just use the first circle as an anchor for the text
+        if circles:
+            text_x, text_y, _ = circles[0]
+            cv2.putText(vis_img, str(pid), (int(text_x)-10, int(text_y)-10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
+        for i, (cx, cy, r) in enumerate(circles):
+            # Measure
+            r_int = int(round(r))
+            cx_int = int(round(cx))
+            cy_int = int(round(cy))
+            
+            if r_int <= 0:
+                means.append(np.nan)
+                areas.append(0)
+                continue
+
+            # Create mask for this circle
+            y_min, y_max = max(0, cy_int - r_int - 1), min(h, cy_int + r_int + 2)
+            x_min, x_max = max(0, cx_int - r_int - 1), min(w, cx_int + r_int + 2)
+            
+            Y, X = np.ogrid[y_min:y_max, x_min:x_max]
+            dist_sq = (X - cx)**2 + (Y - cy)**2
+            mask_circle = dist_sq <= r**2
+            
+            roi_vals = brightness_image[y_min:y_max, x_min:x_max]
+            mask_circle = mask_circle[:roi_vals.shape[0], :roi_vals.shape[1]]
+            
+            vals = roi_vals[mask_circle]
+            
+            if vals.size > 0:
+                means.append(round(float(np.mean(vals)), 2))
+                areas.append(vals.size)
+            else:
+                means.append(0.0)
+                areas.append(0)
+
+            # Visualize: Draw circle1
+            # Color cycle: Red, Green, Magenta, Cyan
+            colors = [(255, 0, 0), (255, 0, 0), (255, 0, 0), (255, 0, 0)]
+            color = colors[i % len(colors)]
+            cv2.circle(vis_img, (cx_int, cy_int), r_int, color, 2)
+
+        # [New] Pad lists to ensure alignment
+        while len(means) < max_circles: means.append(np.nan)
+        while len(areas) < max_circles: areas.append(np.nan)
+
+        row = [pid] + means + areas
+        
+        # [New] 2. 添加粒子面积 (Particle Area)
+        if particle_areas is not None and pid in particle_areas:
+            row.append(particle_areas[pid])
+            
+        results.append(row)
+
+    # Prepare Header
+    header = ["particle_id"]
+    for i in range(1, max_circles + 1):
+        header.append(f"C{i}_Mean")
+    for i in range(1, max_circles + 1):
+        header.append(f"C{i}_Area")
+    
+    # [New] Add Particle Area header
+    if particle_areas is not None:
+        header.append("Particle_Area")
+
+    # Calculate Stats
+    mean_row = []
+    sd_row = []
+    sem_row = []
+    
+    if results:
+        mean_row = ["Mean"]
+        sd_row = ["SD"]
+        sem_row = ["Std. Error"]
+        
+        # Calculate stats for each data column
+        for col_idx in range(1, len(header)):
+            col_vals = [row[col_idx] for row in results]
+            valid_vals = [v for v in col_vals if not np.isnan(v)]
+            
+            if valid_vals:
+                mean_row.append(round(np.mean(valid_vals), 2))
+                n = len(valid_vals)
+                if n > 1:
+                    sd = np.std(valid_vals, ddof=1)
+                    sd_row.append(round(sd, 2))
+                    sem_row.append(round(sd / np.sqrt(n), 2))
+                else:
+                    sd_row.append(0.0)
+                    sem_row.append(0.0)
+            else:
+                mean_row.append(0.0)
+                sd_row.append(0.0)
+                sem_row.append(0.0)
+
+    footer_rows = []
+    if mean_row: footer_rows.append(mean_row)
+    if sd_row: footer_rows.append(sd_row)
+    if sem_row: footer_rows.append(sem_row)
+    
+    # Write Excel
+    _write_colored_xlsx(csv_path, header, results, footer_rows=footer_rows)
+    
+    # Save Image
+    cv2.imwrite(overlay_path, vis_img)
+    print(f"[OK] Circles measurement saved: {csv_path}")
+    print(f"[OK] Visualization saved: {overlay_path}")

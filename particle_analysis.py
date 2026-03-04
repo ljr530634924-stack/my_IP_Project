@@ -7,6 +7,7 @@ from scipy import ndimage
 import cv2
 from scipy.signal import argrelextrema
 import gc
+import os
 
 def tiled_canny(image, sigma=1.0, low_threshold=None, high_threshold=None, mask=None, chunk_size=4000):
     """
@@ -183,7 +184,7 @@ def separate_particles_watershed(binary_mask, min_distance=20):
     
     # 4. Watershed segmentation
     # We use -distance because watershed works on basins (minima)
-    labels = watershed(-distance, markers, mask=binary_mask)
+    labels = watershed(-distance, markers, mask=binary_mask, watershed_line=True)
     
     return labels
 
@@ -858,7 +859,12 @@ def find_inner_holes_contours(
     erosion_size=0, # [New] 腐蚀大小 (iterations)，0表示不腐蚀
     debug=False,  # 新增调试参数
     detect_dark=True, # [New] True=检测暗孔(默认), False=检测亮斑
-    predict_4c=False # [New] 是否预测4个对称孔洞
+    predict_4c=False, # [New] 是否预测4个对称孔洞
+    return_data=False, # [New] 是否返回数据字典 {pid: [(x,y,r),...]}
+    use_median_blur=False, # [New] 是否使用中值滤波 (默认False=高斯模糊，保持兼容性)
+    median_ksize=5,        # [New] 中值滤波核大小
+    opening_ksize=3,       # [New] 形态学开运算核大小 (默认3)
+    input_is_binary=False  # [New] 输入是否已经是二值掩膜 (跳过预处理)
 ):
     """
     针对每个粒子区域，分别寻找内部的4个孔洞。
@@ -888,6 +894,7 @@ def find_inner_holes_contours(
     all_holes = []
     all_4c_circles = [] # [New] 存储 (x, y, radius) 用于4C模式
     all_centroids = [] # [New] 用于存储质心以便画蓝点
+    circles_data = {} # [New] 用于返回的数据字典
     
     # 2. 遍历每个粒子 (Per-Region Search)
     for idx, r in enumerate(regions):
@@ -914,34 +921,53 @@ def find_inner_holes_contours(
         else:
             safe_mask = roi_mask
 
-        # Step 3: 寻找小圆
-        # a. 高斯模糊
-        blurred = cv2.GaussianBlur(masked_roi, (5, 5), 0)
-        
-        # b. 自适应阈值
-        # 如果检测暗孔，使用 INV (暗->白)；如果检测亮斑，使用 BINARY (亮->白)
-        thresh_type = cv2.THRESH_BINARY_INV if detect_dark else cv2.THRESH_BINARY
-        thresh = cv2.adaptiveThreshold(
-            blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            thresh_type, block_size, c_value
-        )
-        
-        # [Modified] 应用 safe_mask 而不是 roi_mask，从而物理屏蔽边缘区域
-        thresh = cv2.bitwise_and(thresh, thresh, mask=safe_mask)
-        
-        # c. 形态学去噪
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        opened = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+        # Step 3: 寻找小圆 (根据输入类型分支)
+        if input_is_binary:
+            # 如果输入已经是二值图 (Signal Mask)，直接应用安全掩膜
+            # 此时 masked_roi 已经是 0/255 的二值图
+            opened = cv2.bitwise_and(masked_roi, masked_roi, mask=safe_mask)
+        else:
+            # a. 滤波 (根据参数选择 高斯模糊 或 中值滤波)
+            if use_median_blur:
+                k = median_ksize if median_ksize % 2 == 1 else median_ksize + 1
+                blurred = cv2.medianBlur(masked_roi, k)
+            else:
+                blurred = cv2.GaussianBlur(masked_roi, (5, 5), 0)
+            
+            # b. 自适应阈值
+            # 如果检测暗孔，使用 INV (暗->白)；如果检测亮斑，使用 BINARY (亮->白)
+            thresh_type = cv2.THRESH_BINARY_INV if detect_dark else cv2.THRESH_BINARY
+            thresh = cv2.adaptiveThreshold(
+                blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                thresh_type, block_size, c_value
+            )
+            
+            # [Modified] 应用 safe_mask 而不是 roi_mask，从而物理屏蔽边缘区域
+            thresh = cv2.bitwise_and(thresh, thresh, mask=safe_mask)
+            
+            # c. 形态学去噪
+            if opening_ksize > 0:
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (opening_ksize, opening_ksize))
+                opened = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+            else:
+                opened = thresh
         
         # d. 轮廓查找
         contours, _ = cv2.findContours(opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         # --- DEBUG: 保存前几个粒子的中间结果 ---
-        if debug and r.label <= 3:
+        if debug and r.label <= 5:
             debug_vis = cv2.cvtColor(roi_img, cv2.COLOR_GRAY2BGR)
             cv2.drawContours(debug_vis, contours, -1, (0, 255, 0), 1)
-            cv2.imwrite(f"debug_particle_{r.label}_1_thresh.png", opened)
-            cv2.imwrite(f"debug_particle_{r.label}_2_contours.png", debug_vis)
+            
+            # 确定保存路径 (与 save_path 同目录)
+            debug_dir = os.path.dirname(save_path) if save_path else "."
+            p1 = os.path.join(debug_dir, f"debug_particle_{r.label}_1_thresh.png")
+            p2 = os.path.join(debug_dir, f"debug_particle_{r.label}_2_contours.png")
+            
+            cv2.imwrite(p1, opened)
+            cv2.imwrite(p2, debug_vis)
+            print(f"  [DEBUG] Saved: {os.path.basename(p1)}")
         
         candidates = []
         for cnt in contours:
@@ -965,6 +991,7 @@ def find_inner_holes_contours(
         # e. 排序并取前1 (只保留最圆的一个)
         candidates.sort(key=lambda x: x['circularity'], reverse=True)
         
+        current_particle_circles = []
         if predict_4c:
             if len(candidates) > 0:
                 best_center = candidates[0]['center'] # (x, y)
@@ -989,8 +1016,13 @@ def find_inner_holes_contours(
                 
                 for p in pts:
                     all_4c_circles.append((p[0], p[1], radius))
+                    current_particle_circles.append((p[0], p[1], radius))
         else:
-            all_holes.extend([c['center'] for c in candidates[:1]])
+            for c in candidates[:1]:
+                all_holes.append(c['center'])
+                current_particle_circles.append((c['center'][0], c['center'][1], 4.0)) # 默认半径4
+        
+        circles_data[pid] = current_particle_circles
 
     # 4. 生成结果图片 (无论是否保存，都生成以便返回)
     if image_gray.ndim == 2:
@@ -1033,4 +1065,172 @@ def find_inner_holes_contours(
         print(f"Saved hole visualization to: {save_path}")
 
     # 返回标注好的图片
+    if return_data:
+        return final_vis, circles_data
     return final_vis
+
+def find_MC(
+    structure_mask,
+    signal_mask,
+    save_path=None,
+    min_area=10,
+    max_area=5000,
+    min_circularity=0.5,
+    return_data=True,
+    ch00_image=None, # [New] 接收 Ch00 原图用于可视化背景
+    debug_save_path=None # [Modified] 调试图片保存路径，如果为None则不生成
+):
+    """
+    替代 find_inner_holes_contours 的专用函数 (Measurement Circle Finder)。
+    
+    逻辑：
+    1. 接收 structure_mask (粒子) 和 signal_mask (信号)。
+    2. 生成可视化图：
+       - 如果提供 ch00_image: 在原图上画结构轮廓(绿) + 测量圆(红/蓝) + ID。
+       - 如果未提供: 背景黑，粒子白，信号黑 (即粒子中间有黑洞)。
+    3. 在数学上计算信号点位置 (structure AND signal)。
+    4. 找到最圆的一个信号点作为基准，预测 4C 位置。
+    """
+    # 1. 准备数据
+    if structure_mask.dtype == bool: structure_mask = (structure_mask * 255).astype(np.uint8)
+    if signal_mask.dtype == bool: signal_mask = (signal_mask * 255).astype(np.uint8)
+
+    # 2. 生成可视化底图
+    if ch00_image is not None:
+        # 归一化 Ch00 到 8-bit 以便显示
+        if ch00_image.dtype == np.uint16:
+            vis_base = cv2.normalize(ch00_image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        elif ch00_image.dtype != np.uint8:
+            vis_base = cv2.normalize(ch00_image, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        else:
+            vis_base = ch00_image.copy()
+            
+        if vis_base.ndim == 2:
+            vis_img_color = cv2.cvtColor(vis_base, cv2.COLOR_GRAY2BGR)
+        else:
+            vis_img_color = vis_base
+        
+        # [Modified] 应用背景遮罩：粒子内部保留原图，外部变黑
+        vis_img_color = cv2.bitwise_and(vis_img_color, vis_img_color, mask=structure_mask)
+            
+        # 在原图上画出 Structure Mask 的轮廓 (绿色)，标示粒子范围
+        contours, _ = cv2.findContours(structure_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(vis_img_color, contours, -1, (0, 255, 0), 1)
+    else:
+        # 旧逻辑：生成白粒子套黑洞的合成图
+        vis_img = np.zeros_like(structure_mask)
+        vis_img[structure_mask > 0] = 255
+        vis_img[signal_mask > 0] = 0
+        vis_img_color = cv2.cvtColor(vis_img, cv2.COLOR_GRAY2BGR)
+
+    # [New] 准备 Debug 图片 (全黑背景)
+    if debug_save_path:
+        debug_img = np.zeros((structure_mask.shape[0], structure_mask.shape[1], 3), dtype=np.uint8)
+        # 画出 Structure Mask 的轮廓 (白色)
+        s_contours, _ = cv2.findContours(structure_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(debug_img, s_contours, -1, (255, 255, 255), 1)
+
+    # 3. 连通域分析 (按粒子遍历)
+    num_labels, labels = cv2.connectedComponents(structure_mask)
+    regions = measure.regionprops(labels)
+    # 按 x 坐标排序粒子
+    regions.sort(key=lambda x: x.centroid[1])
+
+    circles_data = {} # {pid: [(x,y,r), ...]}
+    particle_areas = {} # {pid: area}
+
+    for idx, r in enumerate(regions):
+        pid = idx + 1
+        cy, cx = r.centroid # 粒子质心
+        
+        # [New] 记录粒子面积
+        particle_areas[pid] = r.area
+        
+        # [New] 估算粒子半径 (用于距离过滤)
+        particle_radius = r.equivalent_diameter / 2.0
+        
+        # 在当前粒子范围内找信号 (Intersection)
+        # 提取当前粒子的局部 mask
+        minr, minc, maxr, maxc = r.bbox
+        local_structure = (labels[minr:maxr, minc:maxc] == r.label).astype(np.uint8)
+        local_signal = signal_mask[minr:maxr, minc:maxc]
+        
+        # 只有在粒子内部且是信号的地方才是 1 (候选点)
+        intersection = cv2.bitwise_and(local_signal, local_signal, mask=local_structure)
+        
+        # 找轮廓 (在局部坐标系)
+        contours, _ = cv2.findContours(intersection, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # [Debug] 在 debug_img 上画出所有检测到的信号轮廓 (黄色)
+        # 注意：不再画在主可视化图 vis_img_color 上
+        if debug_save_path:
+            global_contours = []
+            for cnt in contours:
+                cnt_shifted = cnt.copy()
+                cnt_shifted[:, :, 0] += minc # x坐标加列偏移
+                cnt_shifted[:, :, 1] += minr # y坐标加行偏移
+                global_contours.append(cnt_shifted)
+            cv2.drawContours(debug_img, global_contours, -1, (0, 255, 255), 1)
+
+        candidates = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if min_area < area < max_area:
+                perimeter = cv2.arcLength(cnt, True)
+                if perimeter == 0: continue
+                circularity = 4 * np.pi * area / (perimeter * perimeter)
+                
+                if circularity >= min_circularity:
+                    M = cv2.moments(cnt)
+                    if M["m00"] != 0:
+                        scx = int(M["m10"] / M["m00"]) + minc # 转回全局坐标
+                        scy = int(M["m01"] / M["m00"]) + minr
+                        
+                        # [New] 计算候选点到粒子质心的距离
+                        dist_to_centroid = np.sqrt((scx - cx)**2 + (scy - cy)**2)
+                        
+                        # [New] 距离过滤: 剔除离质心太近(中心噪点)或太远(边缘噪点)的候选点
+                        # 范围设为半径的 20% 到 90%
+                        if 0.2 * particle_radius < dist_to_centroid < 0.9 * particle_radius:
+                            candidates.append({'center': (scx, scy), 'circularity': circularity, 'area': area})
+
+        # 排序找到最圆的一个
+        candidates.sort(key=lambda x: x['circularity'], reverse=True)
+        
+        current_circles = []
+        if candidates:
+            best = candidates[0]['center'] # (x, y)
+            
+            # 4C 预测逻辑
+            vx, vy = best[0] - cx, best[1] - cy
+            pts = [
+                (cx + vx, cy + vy), (cx - vy, cy + vx),
+                (cx - vx, cy - vy), (cx + vy, cy - vx)
+            ]
+            radius = r.minor_axis_length / 6.0
+            
+            for px, py in pts:
+                current_circles.append((px, py, radius))
+                # [Modified] 画图：蓝圈 + 蓝色实心点 (BGR: 255, 0, 0)
+                cv2.circle(vis_img_color, (int(px), int(py)), int(radius), (255, 0, 0), 2)
+                cv2.circle(vis_img_color, (int(px), int(py)), 2, (255, 0, 0), -1)
+            
+            # 标记最圆的那个点为绿色，方便区分基准
+            cv2.circle(vis_img_color, (int(best[0]), int(best[1])), 4, (0, 255, 0), -1)
+
+        circles_data[pid] = current_circles
+        
+        # [Modified] 标记粒子 ID (字体放大到 2.0，改为红色以区分蓝色圆圈)
+        cv2.putText(vis_img_color, str(pid), (int(cx), int(cy)), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 255), 3)
+
+    if save_path:
+        cv2.imwrite(save_path, vis_img_color)
+        print(f"Saved MC visualization: {save_path}")
+        
+    if debug_save_path:
+        cv2.imwrite(debug_save_path, debug_img)
+        print(f"Saved MC debug visualization: {debug_save_path}")
+
+    if return_data:
+        return vis_img_color, circles_data, particle_areas
+    return vis_img_color

@@ -44,32 +44,46 @@ def overlay_mask(
     # Determine max value for base dtype
     if not np.issubdtype(base_gray.dtype, np.integer):
         raise ValueError(f"Base dtype not integer: {base_gray.dtype}")
-    base_max = float(np.iinfo(base_gray.dtype).max)
+    
+    # --- Memory Optimization: Avoid float32 conversion ---
+    target_dtype = base_gray.dtype
+    base_max = np.iinfo(target_dtype).max
+    
+    mask_dtype = mask_bgr.dtype
+    mask_max = np.iinfo(mask_dtype).max
 
     # Detect white in mask: pixels close to max in all channels
-    mask_max = float(np.iinfo(mask_bgr.dtype).max)
-    white = (mask_bgr[:, :, 0] >= mask_max * 0.95) & \
-            (mask_bgr[:, :, 1] >= mask_max * 0.95) & \
-            (mask_bgr[:, :, 2] >= mask_max * 0.95)
+    thresh_val = int(mask_max * 0.95)
+    white = (mask_bgr[:, :, 0] >= thresh_val) & \
+            (mask_bgr[:, :, 1] >= thresh_val) & \
+            (mask_bgr[:, :, 2] >= thresh_val)
 
-    if invert:
-        # Swap interpretation: white stays, non-white transparent
-        alpha = np.where(white, 1.0, 0.0).astype(np.float32)
+    # Prepare output image (start with base converted to BGR)
+    if base_gray.ndim == 2:
+        output = cv2.cvtColor(base_gray, cv2.COLOR_GRAY2BGR)
     else:
-        alpha = np.where(white, 0.0, 1.0).astype(np.float32)
+        output = cv2.cvtColor(base_gray, cv2.COLOR_GRAY2BGR)
 
-    # Normalize base and mask for blending
-    base_f = base_gray.astype(np.float32) / base_max
-    mask_f = mask_bgr.astype(np.float32) / mask_max
-    alpha_3 = alpha[:, :, None]
+    # Prepare mask in target dtype
+    if mask_dtype == target_dtype:
+        mask_scaled = mask_bgr
+    else:
+        # Scale mask to match base dtype
+        scale = float(base_max) / float(mask_max)
+        if target_dtype == np.uint16 and mask_dtype == np.uint8:
+            mask_scaled = mask_bgr.astype(np.uint16) * 257
+        elif target_dtype == np.uint8 and mask_dtype == np.uint16:
+            mask_scaled = (mask_bgr // 257).astype(np.uint8)
+        else:
+            mask_scaled = (mask_bgr.astype(np.float32) * scale).astype(target_dtype)
 
     # Composite: mask over base
-    comp = mask_f * alpha_3 + base_f[:, :, None] * (1.0 - alpha_3)
-    comp = np.clip(comp * base_max, 0, base_max).astype(base_gray.dtype)
+    mask_indices = white if invert else ~white
+    np.copyto(output, mask_scaled, where=mask_indices[:, :, None])
 
     # Save as 3-channel image (no alpha in output since white was made transparent in composite)
     save_path = str(save_path)
-    cv2.imwrite(save_path, comp)
+    cv2.imwrite(save_path, output)
     print(f"Saved overlaid image to: {save_path}")
 
 

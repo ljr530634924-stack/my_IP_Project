@@ -14,7 +14,7 @@ Image.MAX_IMAGE_PIXELS = None
 
 # --- Configuration ---
 # Set this to the folder containing your images.
-INPUT_FOLDER = r"F:\Jinrui\1mgBiotin_30mgSVA_100ugAb488_10ugBiotinAb488"
+INPUT_FOLDER = r"D:\Ingenieurpraixs\test_45-60min"
 
 # Refined extraction parameters (Structure)
 CIRCLE_RADIUS_SCALE = 1
@@ -42,8 +42,8 @@ def process_pair(ch00_path, ch01_path):
     if not prefix:
         prefix = "output"
 
-    csv_output = os.path.join(directory, f"{prefix}_WN_MC_results.xlsx")
-    id_map_output = os.path.join(directory, f"{prefix}_WN_MC_id_map.png")
+    csv_output = os.path.join(directory, f"{prefix}_results.xlsx")
+    id_map_output = os.path.join(directory, f"{prefix}_map.png")
 
     try:
         # 1. Extract Structure (Simple Mode)
@@ -77,7 +77,7 @@ def process_pair(ch00_path, ch01_path):
         # 2.1 Overlay axes on ch00 (Option 3: Black BG, Ch00 inside particles, Axes on top)
         if os.path.exists(temp_axes_path):
             print("  2.1 Generating overlay (Option 3)...")
-            overlay_output = os.path.join(directory, f"{prefix}_overlay_axes_ch00.png")
+            overlay_output = os.path.join(directory, f"{prefix}_visualization.png")
             try:
                 axes_img = cv2.imread(temp_axes_path)
                 base_img = cv2.imread(ch00_path, cv2.IMREAD_UNCHANGED)
