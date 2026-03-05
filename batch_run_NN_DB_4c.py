@@ -12,8 +12,8 @@ from overlay_mask import overlay_mask
 
 # --- Configuration ---
 # Set this to the folder containing your images.
-INPUT_FOLDER = r"D:\Ingenieurpraixs\test_45-60min"
-SAVE_DEBUG_INPUTS = False # Set to True to save inputs for debug_holes.py
+INPUT_FOLDER = r"D:\Ingenieurpraixs\test_NN_DB_4c"
+SAVE_DEBUG_INPUTS = True # Set to True to save inputs for debug_holes.py
 
 # --- Parameters for Dirty Background (DB) Extraction (From run_NN_DB_global.py) ---
 MEDIAN_BLUR_KSIZE = 5      # Kernel size (3, 5, 7). Larger = more smoothing.
@@ -246,8 +246,8 @@ def process_pair(ch00_path, ch01_path):
             min_area=20,
             max_area=50000,
             min_circularity=0.6,
-            block_size=21,
-            c_value=8,
+            block_size=13,
+            c_value=1,
             erosion_size=25, 
             debug=False,
             detect_dark=True, 

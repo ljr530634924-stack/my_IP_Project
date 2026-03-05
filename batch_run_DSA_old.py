@@ -21,13 +21,16 @@ except ImportError:
 from handle_ch01 import adjust_ch01_image
 
 # --- Configuration ---
+# Set this to the folder containing your images.
+INPUT_FOLDER = r"D:\Ingenieurpraixs\test_p3"
+
 # ROI Parameters
 ROI_DIAMETER_RATIO = 0.85  # ROI diameter ratio relative to the shorter side of the image
 
 # Signal Detection Parameters (Based on enhanced ch01 image)
 THRESHOLD_RATIO = 0.6      # Threshold ratio (0.0-1.0)
 MIN_AREA = 1000            # Minimum area to keep a signal
-MAX_AREA = 20000           # Maximum area to keep a signal (Increased to match run_DSA)
+MAX_AREA = 15000           # Maximum area to keep a signal
 MIN_CIRCULARITY = 0.4      # Minimum circularity (0.0 - 1.0)
 SMOOTHING_RADIUS = 3       # Smoothing radius for morphological opening
 
@@ -35,8 +38,8 @@ SMOOTHING_RADIUS = 3       # Smoothing radius for morphological opening
 MEASURE_RADIUS = 70       # Fixed measurement circle radius
 
 # Post-processing Filters
-REMOVE_OVERLAPPING = False          # Remove overlapping circles
-ISOLATION_THRESHOLD_RATIO = 0    # Remove circles without neighbors within this distance ratio
+REMOVE_OVERLAPPING = True           # Remove overlapping circles
+ISOLATION_THRESHOLD_RATIO = 3    # Remove circles without neighbors within this distance ratio
 # Visualization
 FONT_SCALE = 0.8
 
@@ -134,10 +137,10 @@ def process_pair(ch00_path, ch01_path):
     adjust_ch01_image(
         ch01_path, 
         temp_adj_path,
-        exposure=1.5,       
+        exposure=3.0,       
         brightness=10,
         contrast_gain=1.0,
-        stretch_low=20,
+        stretch_low=2,
         stretch_high=98.5,
         do_stretch=True
     )
@@ -256,10 +259,10 @@ def process_pair(ch00_path, ch01_path):
     if os.path.exists(temp_adj_path):
         os.remove(temp_adj_path)
 
-def run_batch_dsa(input_folder):
-    print(f"=== Starting Batch DSA Analysis in '{os.path.abspath(input_folder)}' ===")
+def main():
+    print(f"=== Starting Batch DSA Analysis in '{os.path.abspath(INPUT_FOLDER)}' ===")
     
-    search_pattern = os.path.join(input_folder, "*ch00*.tif")
+    search_pattern = os.path.join(INPUT_FOLDER, "*ch00*.tif")
     ch00_files = glob.glob(search_pattern)
     
     if not ch00_files:
@@ -284,9 +287,4 @@ def run_batch_dsa(input_folder):
     print(f"\n=== Batch Processing Complete! Processed {count} pairs. ===")
 
 if __name__ == "__main__":
-    # Default for testing
-    INPUT_FOLDER = r"D:\Ingenieurpraixs\test_p3"
-    if os.path.exists(INPUT_FOLDER):
-        run_batch_dsa(INPUT_FOLDER)
-    else:
-        print("Please set a valid INPUT_FOLDER in the script for standalone testing.")
+    main()

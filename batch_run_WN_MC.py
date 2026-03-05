@@ -13,9 +13,6 @@ from measure_intensity import compute_quadrant_intensity
 Image.MAX_IMAGE_PIXELS = None
 
 # --- Configuration ---
-# Set this to the folder containing your images.
-INPUT_FOLDER = r"D:\Ingenieurpraixs\test_45-60min"
-
 # Refined extraction parameters (Structure)
 CIRCLE_RADIUS_SCALE = 1
 USE_WATERSHED = True
@@ -146,20 +143,23 @@ def process_pair(ch00_path, ch01_path):
         import traceback
         traceback.print_exc()
 
+def run_batch_wn_mc(input_folder):
+    """
+    Main entry point for running the batch WN_MC analysis.
+    :param input_folder: The path to the folder containing image pairs.
+    """
+    print(f"=== Starting Batch WN MC Analysis in '{os.path.abspath(input_folder)}' ===")
 
-def main():
-    print(f"=== Starting Batch WN MC Analysis in '{os.path.abspath(INPUT_FOLDER)}' ===")
-
-    search_pattern = os.path.join(INPUT_FOLDER, "*ch00*.tif")
+    search_pattern = os.path.join(input_folder, "*ch00*.tif")
     ch00_files = glob.glob(search_pattern)
 
     if not ch00_files:
         print(f"No files found matching {search_pattern}")
         return
 
-    print(f"Found {len(ch00_files)} candidate ch00 files.")
+    print(f"Found {len(ch00_files)} candidate ch00 files to process.")
 
-    count = 0
+    processed_count = 0
     for ch00 in ch00_files:
         directory, filename = os.path.split(ch00)
         filename_ch01 = filename.replace("ch00", "ch01")
@@ -170,10 +170,17 @@ def main():
             continue
 
         process_pair(ch00, ch01)
-        count += 1
+        processed_count += 1
 
-    print(f"\n=== Batch Processing Complete! Processed {count} pairs. ===")
+    print(f"\n=== Batch Processing Complete! Processed {processed_count} pairs. ===")
 
 
 if __name__ == "__main__":
-    main()
+    # This block allows the script to be run standalone for testing.
+    # The GUI will call the `run_batch_wn_mc` function directly.
+    DEFAULT_INPUT_FOLDER = r"D:\Ingenieurpraixs\test_45-60min"
+    if not os.path.isdir(DEFAULT_INPUT_FOLDER):
+        print(f"[ERROR] Default test folder not found: {DEFAULT_INPUT_FOLDER}")
+        print("Please update the DEFAULT_INPUT_FOLDER path in the script.")
+    else:
+        run_batch_wn_mc(DEFAULT_INPUT_FOLDER)

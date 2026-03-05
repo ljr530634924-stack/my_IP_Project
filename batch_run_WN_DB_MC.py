@@ -11,8 +11,7 @@ from particle_analysis import separate_particles_watershed, find_notches_and_axe
 from measure_intensity import compute_quadrant_intensity
 
 # --- Configuration ---
-# Set this to the folder containing your images.
-INPUT_FOLDER = r"F:\Jinrui\qCAP_QuantaRed_750um\Biotin_4Conc\t45min60min" # 请修改为您的图片文件夹路径
+# Default folder for standalone execution. The GUI will provide its own path.
 SAVE_DEBUG_IMAGES = False  # Set to True to save intermediate debug images
 
 # --- Parameters for Dirty Background (DB) Extraction (From run_NN_DB_global.py) ---
@@ -235,20 +234,24 @@ def process_pair(ch00_path, ch01_path):
         import traceback
         traceback.print_exc()
 
-def main():
+def run_batch_wn_db_mc(input_folder):
+    """
+    Main entry point for running the batch WN_DB_MC analysis.
+    :param input_folder: The path to the folder containing image pairs.
+    """
     multiprocessing.freeze_support()
-    print(f"=== Starting Batch WN_DB_MC Analysis in '{os.path.abspath(INPUT_FOLDER)}' ===")
+    print(f"=== Starting Batch WN_DB_MC Analysis in '{os.path.abspath(input_folder)}' ===")
     
-    search_pattern = os.path.join(INPUT_FOLDER, "*ch00*.tif")
+    search_pattern = os.path.join(input_folder, "*ch00*.tif")
     ch00_files = glob.glob(search_pattern)
     
     if not ch00_files:
         print(f"No files found matching {search_pattern}")
         return
 
-    print(f"Found {len(ch00_files)} candidate ch00 files.")
+    print(f"Found {len(ch00_files)} candidate ch00 files to process.")
 
-    count = 0
+    processed_count = 0
     for ch00 in ch00_files:
         directory, filename = os.path.split(ch00)
         filename_ch01 = filename.replace("ch00", "ch01")
@@ -259,9 +262,16 @@ def main():
             continue
             
         process_pair(ch00, ch01)
-        count += 1
+        processed_count += 1
 
-    print(f"\n=== Batch Processing Complete! Processed {count} pairs. ===")
+    print(f"\n=== Batch Processing Complete! Processed {processed_count} pairs. ===")
 
 if __name__ == "__main__":
-    main()
+    # This block allows the script to be run standalone for testing.
+    # The GUI will call the `run_batch_wn_db_mc` function directly.
+    DEFAULT_INPUT_FOLDER = r"F:\Jinrui\qCAP_QuantaRed_750um\Biotin_4Conc\t45min60min"
+    if not os.path.isdir(DEFAULT_INPUT_FOLDER):
+        print(f"[ERROR] Default test folder not found: {DEFAULT_INPUT_FOLDER}")
+        print("Please update the DEFAULT_INPUT_FOLDER path in the script.")
+    else:
+        run_batch_wn_db_mc(DEFAULT_INPUT_FOLDER)

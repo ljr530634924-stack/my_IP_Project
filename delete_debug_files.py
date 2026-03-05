@@ -3,7 +3,7 @@ import glob
 
 # --- 1. 配置 ---
 # 请将此路径更改为您要清理的目标文件夹
-TARGET_DIR = r"F:\Jinrui\qCAP_QuantaRed_750um\Biotin_4Conc\t45min60min" 
+TARGET_DIR = r"F:\Jinrui\qCAP_QuantaRed_750um\Same Biotin\Time_20min" 
 
 def main():
     """
@@ -18,7 +18,7 @@ def main():
 
     # --- 2. 查找所有文件名中包含 "visualization" 的文件 ---
     # 模式 '*visualization*' 会匹配文件名中任何位置包含 'visualization' 的文件。
-    search_pattern = os.path.join(TARGET_DIR, "*map*")
+    search_pattern = os.path.join(TARGET_DIR, "*global*")
     files_to_delete = glob.glob(search_pattern)
     
     if not files_to_delete:
