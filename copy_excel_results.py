@@ -32,7 +32,7 @@ def copy_result_files(source_root, dest_root, log_file_path):
             for root, dirs, files in os.walk(source_root):
                 for filename in files:
                     # 1. 筛选条件：后缀是 .xlsx 且 文件名包含 results (不区分大小写)
-                    if filename.lower().endswith(".xlsx") and "results" in filename.lower():
+                    if filename.lower().endswith(".png") and "visualization" in filename.lower():
                         
                         # 构建源文件的完整路径
                         src_file_path = os.path.join(root, filename)
@@ -81,8 +81,8 @@ if __name__ == "__main__":
     # 请在这里修改您的文件夹路径
     # 建议使用 r"" 原始字符串格式以避免反斜杠转义问题
     
-    SOURCE_FOLDER = r"F:\jinrui_data"      # 源文件夹 (您要搜索的地方)
-    DESTINATION_FOLDER = r"\\nas.ads.mwn.de\tuei\mml\MML MS BS students\Bachelor Students\Jinrui\hard drive data analysis" # 目标文件夹 (您要备份到的地方)
+    SOURCE_FOLDER = r"F:\Jinrui"      # 源文件夹 (您要搜索的地方)
+    DESTINATION_FOLDER = r"\\nas.ads.mwn.de\tuei\mml\MML MS BS students\Bachelor Students\Jinrui\hard_drive_data_analysis_new" # 目标文件夹 (您要备份到的地方)
     LOG_FILE = "copy_log.txt"                          # 日志文件名
 
     # 执行函数

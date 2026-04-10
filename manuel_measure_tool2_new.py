@@ -1,50 +1,67 @@
+"""
+manuel_measure_tool2_new.py
+
+功能:
+1. 手动在 ch00 上放置测量圆环，自动测量 ch01 圆环区域内的平均强度。
+2. 逻辑：每4个圆环一组 (Q1->Q2->Q3->Q4)，循环颜色 (蓝->绿->紫->黄)。
+3. 圆环由外圆半径与内外半径比例 (Percentage) 决定，测量值为环形区域内的平均强度。
+4. 输出：生成包含各象限均值、面积及统计信息的 Excel 表格，以及带有 ID (位于四点中心) 的可视化图。
+"""
+
 import cv2
 import numpy as np
 import os
-import tkinter as tk
-from tkinter import filedialog, messagebox, Scrollbar, Canvas, Listbox
-from PIL import Image, ImageTk  # 需要 pip install pillow
-import gc
 import sys
-# 尝试导入 openpyxl，如果失败则提示
+import glob
+import tkinter as tk
+from tkinter import filedialog, messagebox, Scrollbar, Canvas
+from PIL import Image, ImageTk
+import gc
+
+# 尝试导入 openpyxl
 try:
     from openpyxl import Workbook
+    from openpyxl.styles import Font
 except ImportError:
     print("Error: openpyxl library is missing. Please install it using 'pip install openpyxl'")
-    sys.exit()
-import glob
 
 # --- Configuration ---
-MEASURE_RADIUS = 70       # 原图上的测量半径 (像素)
+MEASURE_RADIUS = 70       # 测量外圆半径 (像素)
+DEFAULT_PERCENTAGE = 0.5  # 内圆半径相对于外圆半径的默认比例
 
-class ManualMeasurer:
+class ManualMeasurer2:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Manual Measurement Tool (File List & Auto-Save)")
+        self.root.title("Manual Measurement Tool 2 (4-Quadrant Annular Ring Mode)")
         self.root.geometry("1200x800")
 
         # Data
-        self.points = []      # 存储选中的点 (x, y) -> 原图坐标
-        self.raw_ch00 = None  # BGR numpy array
-        self.vis_ch00 = None  # RGB numpy array (normalized)
+        self.points = []      # 存储选中的点 [(x, y), ...]
+        self.raw_ch00 = None  # BGR numpy array (用于处理)
+        self.vis_ch00 = None  # RGB numpy array (用于显示)
 
-        self.tk_img = None    # Keep reference to prevent GC
+        self.tk_img = None    # 保持引用防止GC回收
         self.zoom_level = 1.0
-        self.is_first_load = True # 标记是否为第一次加载，用于保持缩放
+        self.is_first_load = True
         self.ch00_path = ""
-        self.ch01_path = ""   # Store path, load only when needed
-        self.image_files = [] # 当前文件夹下的文件列表
+        self.ch01_path = ""
+        self.image_files = []
 
         self.raw_w = 0
         self.raw_h = 0
 
-        self.measure_radius = MEASURE_RADIUS
+        self.measure_radius = MEASURE_RADIUS      # 外圆半径
+        self.percentage = DEFAULT_PERCENTAGE      # 内圆半径 / 外圆半径
 
-        # UI Setup
+        # 象限配置
+        self.colors_tk = ["#0000FF", "#00FF00", "#FF00FF", "#FFFF00"]  # 蓝, 绿, 紫(洋红), 黄
+        self.colors_cv = [(255, 0, 0), (0, 255, 0), (255, 0, 255), (0, 255, 255)]  # BGR
+        self.quadrant_names = ["Q1 (Blue)", "Q2 (Green)", "Q3 (Purple)", "Q4 (Yellow)"]
+
         self._setup_ui()
 
     def _setup_ui(self):
-        # 1. Toolbar
+        # 1. 工具栏
         toolbar = tk.Frame(self.root, bd=1, relief=tk.RAISED)
         toolbar.pack(side=tk.TOP, fill=tk.X)
 
@@ -56,18 +73,24 @@ class ManualMeasurer:
         self.scale_zoom.set(1.0)
         self.scale_zoom.pack(side=tk.LEFT, padx=5)
 
-        tk.Label(toolbar, text="Radius:").pack(side=tk.LEFT, padx=5)
+        tk.Label(toolbar, text="Outer Radius:").pack(side=tk.LEFT, padx=5)
         self.scale_radius = tk.Scale(toolbar, from_=10, to=200, orient=tk.HORIZONTAL, command=self.on_radius_change)
         self.scale_radius.set(self.measure_radius)
         self.scale_radius.pack(side=tk.LEFT, padx=5)
 
+        tk.Label(toolbar, text="Inner/Outer (%):").pack(side=tk.LEFT, padx=5)
+        self.scale_percentage = tk.Scale(toolbar, from_=0, to=99, orient=tk.HORIZONTAL, command=self.on_percentage_change)
+        self.scale_percentage.set(int(self.percentage * 100))
+        self.scale_percentage.pack(side=tk.LEFT, padx=5)
+
         btn_undo = tk.Button(toolbar, text="Undo (Right Click)", command=self.undo_point)
         btn_undo.pack(side=tk.LEFT, padx=5)
 
-        btn_save = tk.Button(toolbar, text="Save & Export (Enter)", command=lambda: self.save_data(), bg="#ddffdd")
+        btn_save = tk.Button(toolbar, text="Save & Export (Enter)", command=self.save_data, bg="#ddffdd")
         btn_save.pack(side=tk.LEFT, padx=20)
 
-        self.lbl_status = tk.Label(toolbar, text="Please load images.", font=("Arial", 10))
+        # 状态栏
+        self.lbl_status = tk.Label(toolbar, text="Please load images.", font=("Arial", 12, "bold"), width=40)
         self.lbl_status.pack(side=tk.RIGHT, padx=10)
 
         # 2. 主容器 (左右分栏)
@@ -78,11 +101,11 @@ class ManualMeasurer:
         frame_left = tk.Frame(container, width=200, bg="#f0f0f0")
         frame_left.pack(side=tk.LEFT, fill=tk.Y)
 
-        sb_y = Scrollbar(frame_left, orient=tk.VERTICAL)
-        sb_x = Scrollbar(frame_left, orient=tk.HORIZONTAL)
+        sb_y = tk.Scrollbar(frame_left, orient=tk.VERTICAL)
+        sb_x = tk.Scrollbar(frame_left, orient=tk.HORIZONTAL)
 
-        self.lst_files = Listbox(frame_left, width=30, font=("Arial", 10), selectmode=tk.SINGLE,
-                                   yscrollcommand=sb_y.set, xscrollcommand=sb_x.set)
+        self.lst_files = tk.Listbox(frame_left, width=30, font=("Arial", 10), selectmode=tk.SINGLE,
+                                    yscrollcommand=sb_y.set, xscrollcommand=sb_x.set)
 
         sb_y.config(command=self.lst_files.yview)
         sb_x.config(command=self.lst_files.xview)
@@ -100,8 +123,8 @@ class ManualMeasurer:
         self.h_scroll = Scrollbar(frame_right, orient=tk.HORIZONTAL)
 
         self.canvas = Canvas(frame_right, bg="#202020",
-                                xscrollcommand=self.h_scroll.set,
-                                yscrollcommand=self.v_scroll.set)
+                             xscrollcommand=self.h_scroll.set,
+                             yscrollcommand=self.v_scroll.set)
 
         self.v_scroll.config(command=self.canvas.yview)
         self.h_scroll.config(command=self.canvas.xview)
@@ -110,7 +133,7 @@ class ManualMeasurer:
         self.h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Bindings
+        # 事件绑定
         self.canvas.bind("<Motion>", self.on_mouse_move)
         self.canvas.bind("<Button-1>", self.on_left_click)
         self.canvas.bind("<Button-3>", lambda e: self.undo_point())
@@ -119,6 +142,10 @@ class ManualMeasurer:
 
     def run(self):
         self.root.mainloop()
+
+    def inner_radius(self):
+        """计算内圆半径"""
+        return max(0, int(self.measure_radius * self.percentage))
 
     def on_file_select(self, event):
         """列表选择事件：自动保存并加载新图"""
@@ -148,8 +175,10 @@ class ManualMeasurer:
             return
 
         directory = os.path.dirname(file_path)
+
         search_pattern = os.path.join(directory, "*ch00*.tif")
-        self.image_files = sorted(glob.glob(search_pattern))
+        files = glob.glob(search_pattern)
+        self.image_files = sorted(files)
 
         self.lst_files.delete(0, tk.END)
         for i, f in enumerate(self.image_files):
@@ -190,14 +219,11 @@ class ManualMeasurer:
             if os.path.exists(result_path):
                 self.lst_files.itemconfig(i, {'bg': '#ddffdd'})
 
-        # 自动加载第一张
         self.load_image_file(self.image_files[0])
-        
-        # 在列表中选中第一项
+
         self.lst_files.selection_clear(0, tk.END)
         self.lst_files.selection_set(0)
         self.lst_files.see(0)
-
 
     def load_image_file(self, file_path):
         """加载单张图片的实际逻辑"""
@@ -250,18 +276,13 @@ class ManualMeasurer:
             self.is_first_load = False
 
         self.refresh_canvas()
-        self.lbl_status.config(text=f"Loaded: {filename}")
+        self.update_status_label()
 
     def normalize_image(self, img):
-        """将 16-bit 或任意图像归一化到 0-255 (8-bit) 并转为 RGB 用于显示"""
-        # 优化：先降采样计算百分位数，避免全图转 float32 爆内存
-        # 步长取 10，相当于只用 1/100 的像素计算统计值，速度快且内存低
+        """归一化任意位深图像到 8-bit RGB"""
         subsample = img[::10, ::10]
         vmin, vmax = np.percentile(subsample, (1, 99))
 
-        # 使用 OpenCV 的 convertScaleAbs 进行快速线性变换和转 8-bit
-        # 公式: dst = src * alpha + beta
-        # 我们想要: (x - vmin) / (vmax - vmin) * 255
         if vmax > vmin:
             alpha = 255.0 / (vmax - vmin)
             beta = -vmin * alpha
@@ -271,7 +292,6 @@ class ManualMeasurer:
 
         img_8u = cv2.convertScaleAbs(img, alpha=alpha, beta=beta)
 
-        # 转为 RGB (PIL 需要 RGB)
         if img_8u.ndim == 2:
             img_rgb = cv2.cvtColor(img_8u, cv2.COLOR_GRAY2RGB)
         else:
@@ -286,103 +306,138 @@ class ManualMeasurer:
         self.measure_radius = int(val)
         self.redraw_annotations()
 
+    def on_percentage_change(self, val):
+        self.percentage = int(val) / 100.0
+        self.redraw_annotations()
+
     def refresh_canvas(self):
         if self.vis_ch00 is None:
             return
 
-        # 1. 根据缩放比例调整图像大小
         new_w = int(self.raw_w * self.zoom_level)
         new_h = int(self.raw_h * self.zoom_level)
 
-        # 使用 OpenCV resize 比较快
         resized_ch00 = cv2.resize(self.vis_ch00, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
 
-        # 2. 单图显示，不再拼接
-        # combined = np.hstack((resized_ch00, resized_ch01))
-
-        # 3. 转为 Tkinter 图像
         pil_img = Image.fromarray(resized_ch00)
         self.tk_img = ImageTk.PhotoImage(pil_img)
 
-        # 4. 更新 Canvas
-        self.canvas.delete("all") # 清除所有
+        self.canvas.delete("all")
         self.canvas.create_image(0, 0, image=self.tk_img, anchor="nw")
         self.canvas.config(scrollregion=self.canvas.bbox("all"))
-        
-        # 5. 重绘已选点
+
         self.redraw_annotations()
 
+    def update_status_label(self):
+        """更新状态栏，显示下一个圆环的颜色"""
+        count = len(self.points)
+        step = count % 4
+        particle_idx = count // 4 + 1
+
+        text = f"Next: {self.quadrant_names[step]} | Particle #{particle_idx} | Total Rings: {count}"
+
+        bg_color = self.colors_tk[step]
+        fg_color = "white" if step in [0, 2] else "black"
+
+        self.lbl_status.config(text=text, bg=bg_color, fg=fg_color)
+
     def redraw_annotations(self):
-        """重绘所有已选点"""
-        self.canvas.delete("overlay") # 清除旧的标记
+        """重绘所有已放置的圆环"""
+        self.canvas.delete("overlay")
 
         scale = self.zoom_level
-        r = self.measure_radius * scale
+        r_outer = self.measure_radius * scale
+        r_inner = self.inner_radius() * scale
 
         for i, (px, py) in enumerate(self.points):
             cx = px * scale
             cy = py * scale
 
-            # 绘制左图圆圈 (ch00)
-            self.canvas.create_oval(cx-r, cy-r, cx+r, cy+r, outline="#00FF00", width=2, tags="overlay")
-            self.canvas.create_text(cx, cy, text=str(i+1), fill="#00FF00", font=("Arial", 12, "bold"), tags="overlay")
+            step = i % 4
+            color = self.colors_tk[step]
+
+            # 外圆
+            self.canvas.create_oval(cx - r_outer, cy - r_outer, cx + r_outer, cy + r_outer,
+                                    outline=color, width=2, tags="overlay")
+            # 内圆（虚线）
+            if r_inner > 0:
+                self.canvas.create_oval(cx - r_inner, cy - r_inner, cx + r_inner, cy + r_inner,
+                                        outline=color, width=1, dash=(4, 4), tags="overlay")
+            # 象限编号
+            self.canvas.create_text(cx, cy, text=str(step + 1), fill=color,
+                                    font=("Arial", 10, "bold"), tags="overlay")
 
     def on_mouse_move(self, event):
-        if self.vis_ch00 is None: return
+        if self.vis_ch00 is None:
+            return
 
-        # 获取 Canvas 坐标 (考虑滚动条偏移)
         canvas_x = self.canvas.canvasx(event.x)
         canvas_y = self.canvas.canvasy(event.y)
 
-        scale = self.zoom_level
-        rel_x = canvas_x
-
-        rel_y = canvas_y
-
-        # 绘制光标预览 (临时)
         self.canvas.delete("cursor")
-        r = self.measure_radius * scale
 
-        # 左侧光标
-        self.canvas.create_oval(rel_x-r, rel_y-r, rel_x+r, rel_y+r, outline="yellow", width=1, tags="cursor")
+        r_outer = self.measure_radius * self.zoom_level
+        r_inner = self.inner_radius() * self.zoom_level
+
+        step = len(self.points) % 4
+        color = self.colors_tk[step]
+
+        # 外圆预览
+        self.canvas.create_oval(canvas_x - r_outer, canvas_y - r_outer,
+                                canvas_x + r_outer, canvas_y + r_outer,
+                                outline=color, width=1, dash=(4, 4), tags="cursor")
+        # 内圆预览
+        if r_inner > 0:
+            self.canvas.create_oval(canvas_x - r_inner, canvas_y - r_inner,
+                                    canvas_x + r_inner, canvas_y + r_inner,
+                                    outline=color, width=1, dash=(4, 4), tags="cursor")
 
     def on_left_click(self, event):
-        if self.vis_ch00 is None: return
+        if self.vis_ch00 is None:
+            return
 
-        # 获取 Canvas 坐标
         canvas_x = self.canvas.canvasx(event.x)
         canvas_y = self.canvas.canvasy(event.y)
 
-        scale = self.zoom_level
-        rel_x = canvas_x
+        raw_x = int(canvas_x / self.zoom_level)
+        raw_y = int(canvas_y / self.zoom_level)
 
-        # 计算原图坐标
-        raw_x = int(rel_x / scale)
-        raw_y = int(canvas_y / scale)
-
-        # 限制坐标在图像范围内
         raw_x = max(0, min(raw_x, self.raw_w - 1))
         raw_y = max(0, min(raw_y, self.raw_h - 1))
 
         self.points.append((raw_x, raw_y))
         self.redraw_annotations()
-        self.lbl_status.config(text=f"Added point {len(self.points)} at ({raw_x}, {raw_y})")
+        self.update_status_label()
 
     def undo_point(self):
         if self.points:
-            p = self.points.pop()
+            self.points.pop()
             self.redraw_annotations()
-            self.lbl_status.config(text=f"Removed point at {p}")
+            self.update_status_label()
 
     def save_data(self, silent=False):
         if not self.points:
             if not silent:
-                messagebox.showwarning("Warning", "No points selected.")
+                messagebox.showwarning("Warning", "No rings placed.")
             return False
+
+        # 检查分组完整性
+        num_points = len(self.points)
+        remainder = num_points % 4
+        valid_count = num_points - remainder
+
+        if valid_count == 0:
+            if not silent:
+                messagebox.showwarning("Warning", "Not enough rings to form a complete particle (need 4).")
+            return False
+
+        if remainder > 0:
+            messagebox.showinfo("Incomplete Particle", f"Ignored the last {remainder} incomplete rings.")
+
+        final_points = self.points[:valid_count]
 
         print("Calculating and saving...")
 
-        # --- Lazy Load ch01 just for measurement ---
         if not os.path.exists(self.ch01_path):
             if not silent:
                 messagebox.showerror("Error", "ch01 file missing.")
@@ -393,86 +448,161 @@ class ManualMeasurer:
                 messagebox.showerror("Error", "Failed to load ch01.")
             return False
 
-        # 1. 排序：按 X 轴坐标从小到大
-        # 使用 enumerate 保留原始顺序信息(如果需要)，这里主要按 x 排序
-        # data 结构: {'x': x, 'y': y}
-        data_list = [{"x": p[0], "y": p[1]} for p in self.points]
-        data_list.sort(key=lambda p: p["x"])
+        r_outer = self.measure_radius
+        r_inner = self.inner_radius()
+        pct = int(self.percentage * 100)
 
-        # 2. 准备输出
-        results = []
+        particle_results = []
 
-        # 重新加载 ch00 用于画图 (ch00_MC.png)，这次用原分辨率
-        # 注意：normalize_image 返回的是 RGB，OpenCV 保存需要 BGR
         vis_mc = cv2.cvtColor(self.vis_ch00, cv2.COLOR_RGB2BGR)
 
-        for idx, item in enumerate(data_list):
-            new_id = idx + 1
-            cx, cy = item["x"], item["y"]
+        num_particles = valid_count // 4
 
-            # 在 ch01 原图上测量
-            mask = np.zeros(raw_ch01.shape[:2], dtype=np.uint8)
-            cv2.circle(mask, (cx, cy), self.measure_radius, 255, -1)
-            mean_val = cv2.mean(raw_ch01, mask=mask)[0]
+        for i in range(num_particles):
+            p_id = i + 1
+            group = final_points[i * 4: (i + 1) * 4]
 
-            results.append([new_id, cx, cy, mean_val])
+            means = []
+            areas = []
 
-            # 在 ch00_MC 上画图
-            cv2.circle(vis_mc, (cx, cy), self.measure_radius, (0, 255, 0), 4) # 线条粗一点
-            cv2.putText(vis_mc, str(new_id), (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 255, 0), 4)
+            sum_x, sum_y = 0, 0
 
-        # Clean up ch01 immediately
+            for step, (cx, cy) in enumerate(group):
+                sum_x += cx
+                sum_y += cy
+
+                # 构建环形 mask
+                mask_outer = np.zeros(raw_ch01.shape[:2], dtype=np.uint8)
+                cv2.circle(mask_outer, (cx, cy), r_outer, 255, -1)
+
+                if r_inner > 0:
+                    mask_inner = np.zeros(raw_ch01.shape[:2], dtype=np.uint8)
+                    cv2.circle(mask_inner, (cx, cy), r_inner, 255, -1)
+                    annulus_mask = cv2.subtract(mask_outer, mask_inner)
+                else:
+                    annulus_mask = mask_outer
+
+                mean_val = cv2.mean(raw_ch01, mask=annulus_mask)[0]
+                area_val = cv2.countNonZero(annulus_mask)
+
+                means.append(mean_val)
+                areas.append(area_val)
+
+                # 可视化：外圆实线 + 内圆细线
+                color = self.colors_cv[step]
+                cv2.circle(vis_mc, (cx, cy), r_outer, color, 4)
+                if r_inner > 0:
+                    cv2.circle(vis_mc, (cx, cy), r_inner, color, 2)
+
+            # 在几何中心画 ID
+            center_x = int(sum_x / 4)
+            center_y = int(sum_y / 4)
+            cv2.putText(vis_mc, str(p_id), (center_x, center_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 2.0, (255, 255, 255), 4)
+
+            # Row: [id, Q1_m, Q2_m, Q3_m, Q4_m, Q1_a, Q2_a, Q3_a, Q4_a]
+            row_data = [p_id] + means + areas
+            particle_results.append(row_data)
+
         del raw_ch01
         gc.collect()
 
-        # Calculate statistics
-        all_means = [r[3] for r in results]
-        global_mean = np.mean(all_means) if all_means else 0
-        global_std = np.std(all_means, ddof=1) if len(all_means) > 1 else 0
+        # 统计 Footer
+        stats_means = ["Mean"]
+        stats_sd = ["SD"]
+        stats_se = ["Std. Error"]
 
-        # 3. 保存文件
+        num_cols = 8  # 4 Means + 4 Areas
+        for col_idx in range(1, num_cols + 1):
+            vals = [r[col_idx] for r in particle_results]
+            if vals:
+                m = np.mean(vals)
+                s = np.std(vals, ddof=1) if len(vals) > 1 else 0
+                se = s / np.sqrt(len(vals)) if len(vals) > 0 else 0
+                stats_means.append(m)
+                stats_sd.append(s)
+                stats_se.append(se)
+            else:
+                stats_means.append(0)
+                stats_sd.append(0)
+                stats_se.append(0)
+
+        # 保存文件
         directory = os.path.dirname(self.ch00_path)
         base_name = os.path.splitext(os.path.basename(self.ch00_path))[0]
 
-        # 保存图片
-        mc_path = os.path.join(directory, f"{base_name}_00visualization.png")
-        cv2.imwrite(mc_path, vis_mc)
-
-        # 保存 Excel
+        # Excel
         excel_path = os.path.join(directory, f"{base_name}_results.xlsx")
         wb = Workbook()
         ws = wb.active
-        ws.title = "Manual Measurements"
-        ws.append(["ID", "Center_X", "Center_Y", "Mean_Intensity"])
-        for row in results:
+        ws.title = "Manual Data"
+
+        headers = [
+            "particle_id",
+            f"Q1_Annulus_Mean (outer={r_outer}, inner={r_inner}, {pct}%)",
+            f"Q2_Annulus_Mean (outer={r_outer}, inner={r_inner}, {pct}%)",
+            f"Q3_Annulus_Mean (outer={r_outer}, inner={r_inner}, {pct}%)",
+            f"Q4_Annulus_Mean (outer={r_outer}, inner={r_inner}, {pct}%)",
+            "Q1_Annulus_Area",
+            "Q2_Annulus_Area",
+            "Q3_Annulus_Area",
+            "Q4_Annulus_Area"
+        ]
+        ws.append(headers)
+
+        col_map = {
+            2: "0000FF", 6: "0000FF",  # Q1
+            3: "008000", 7: "008000",  # Q2
+            4: "800080", 8: "800080",  # Q3
+            5: "CCCC00", 9: "CCCC00"   # Q4
+        }
+
+        for cell in ws[1]:
+            c_code = col_map.get(cell.column)
+            if c_code:
+                cell.font = Font(bold=True, color=c_code)
+            else:
+                cell.font = Font(bold=True)
+
+        for row in particle_results:
             ws.append(row)
 
-        # Add footer statistics
-        ws.append([])
-        ws.append(["Statistics"])
-        ws.append(["Global Mean", global_mean])
-        ws.append(["Global Std Dev", global_std])
+        ws.append(stats_means)
+        ws.append(stats_sd)
+        ws.append(stats_se)
+
+        for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
+            for cell in row:
+                c_code = col_map.get(cell.column)
+                if c_code:
+                    cell.font = Font(color=c_code)
 
         wb.save(excel_path)
 
-        print(f"Saved:\n  Image: {mc_path}\n  Excel: {excel_path}")
+        # Image
+        vis_path = os.path.join(directory, f"{base_name}_00visualization.png")
+        cv2.imwrite(vis_path, vis_mc)
+
+        print(f"Saved {num_particles} particles.")
+        print(f"Excel: {excel_path}")
+        print(f"Vis: {vis_path}")
 
         try:
             if self.ch00_path in self.image_files:
                 idx = self.image_files.index(self.ch00_path)
                 self.lst_files.itemconfig(idx, {'bg': '#ddffdd'})
-        except (ValueError, tk.TclError):
+        except ValueError:
             pass
 
         if not silent:
-            messagebox.showinfo("Success", f"Saved {len(results)} points.\nCheck folder for _00visualization.png and .xlsx files.")
+            messagebox.showinfo("Success", f"Saved {num_particles} particles successfully!\nIgnored {remainder} rings.")
         else:
-            self.lbl_status.config(text=f"Auto-saved {len(results)} points.")
+            self.lbl_status.config(text=f"Auto-saved {num_particles} particles.", bg="#ddffdd", fg="black")
 
         return True
 
 if __name__ == "__main__":
-    app = ManualMeasurer()
+    app = ManualMeasurer2()
     if len(sys.argv) > 1:
         app.load_from_directory(sys.argv[1])
     app.run()

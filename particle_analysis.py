@@ -1,4 +1,6 @@
 ﻿import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from skimage import io, filters, morphology, exposure, feature, measure
 from skimage.segmentation import watershed, find_boundaries
@@ -864,7 +866,8 @@ def find_inner_holes_contours(
     use_median_blur=False, # [New] 是否使用中值滤波 (默认False=高斯模糊，保持兼容性)
     median_ksize=5,        # [New] 中值滤波核大小
     opening_ksize=3,       # [New] 形态学开运算核大小 (默认3)
-    input_is_binary=False  # [New] 输入是否已经是二值掩膜 (跳过预处理)
+    input_is_binary=False,  # [New] 输入是否已经是二值掩膜 (跳过预处理)
+    predict_4c_radius_divisor=6.0  # [New] 控制4C预测圆半径: radius = minor_axis / divisor
 ):
     """
     针对每个粒子区域，分别寻找内部的4个孔洞。
@@ -1011,7 +1014,7 @@ def find_inner_holes_contours(
                 ]
                 
                 # Radius = Diameter / 6 = (Minor Axis) / 6
-                radius = r.minor_axis_length / 6.0
+                radius = r.minor_axis_length / predict_4c_radius_divisor
                 if radius < 1: radius = 1
                 
                 for p in pts:

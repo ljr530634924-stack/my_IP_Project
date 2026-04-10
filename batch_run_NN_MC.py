@@ -4,15 +4,16 @@ import os
 import glob
 from particle_analysis import run_refined_particle_extraction, find_inner_holes_contours
 from measure_intensity import compute_circles_intensity
+from skimage import measure
 
 # --- Configuration ---
 # Set this to the folder containing your images.
-INPUT_FOLDER = r"F:\Jinrui\qCAP-CRP_11122025"
+INPUT_FOLDER = r"D:\Ingenieurpraixs\quick_r"
 
 # Parameters (Same as run_NN_MC.py)
 CIRCLE_RADIUS_SCALE = 1
 USE_WATERSHED = True
-WATERSHED_MIN_DIST = 20
+WATERSHED_MIN_DIST = 10
 MIN_CIRCULARITY = 0.75
 KEEP_AREA = 3000
 
@@ -21,6 +22,14 @@ BANDPASS_SMALL_SIGMA = 3
 
 STRETCH_LOW_PERCENTILE = 0.5
 STRETCH_HIGH_PERCENTILE = 99.5
+
+# Area filter applied to mask1 contours before hole detection
+MIN_OBJECT_AREA = 10000
+MAX_OBJECT_AREA = 12000
+
+# Radius of the 4C measurement circles: radius = particle.minor_axis / PREDICT_4C_RADIUS_DIVISOR
+# Smaller divisor → larger circles, larger divisor → smaller circles
+PREDICT_4C_RADIUS_DIVISOR = 6.2
 
 def process_pair(ch00_path, ch01_path):
     print(f"Processing pair:\n  CH00: {os.path.basename(ch00_path)}\n  CH01: {os.path.basename(ch01_path)}")
@@ -58,6 +67,21 @@ def process_pair(ch00_path, ch01_path):
             simple_mode=True, # Keep simple mode for speed as in run_NN_MC.py
             save_intermediates=False 
         )
+
+        # === 1b. Filter mask1 contours by area ===
+        filtered_mask = np.zeros_like(mask1)
+        contours_m1, _ = cv2.findContours(mask1, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        kept, removed = 0, 0
+        for cnt in contours_m1:
+            area = cv2.contourArea(cnt)
+            if MIN_OBJECT_AREA <= area <= MAX_OBJECT_AREA:
+                cv2.drawContours(filtered_mask, [cnt], -1, 255, -1)
+                kept += 1
+            else:
+                removed += 1
+        print(f"  [Area filter] kept={kept}, removed={removed} "
+              f"(range {MIN_OBJECT_AREA}–{MAX_OBJECT_AREA} px²)")
+        mask1 = filtered_mask
 
         # === 2. Preprocess ch00 for Hole Detection ===
         print("  2. Preprocessing ch00...")
@@ -113,10 +137,17 @@ def process_pair(ch00_path, ch01_path):
             erosion_size=15, 
             debug=False,
             detect_dark=False, 
-            predict_4c=True,    # Enable 4C prediction
-            return_data=True    # Request data return
+            predict_4c=True,
+            predict_4c_radius_divisor=PREDICT_4C_RADIUS_DIVISOR,
+            return_data=True
         )
         print(f"  -> Saved visualization 00: {vis_00_output}")
+
+        # === 3b. Compute particle areas (matched to pid assignment in find_inner_holes_contours) ===
+        labels = measure.label(mask1)
+        regions = measure.regionprops(labels)
+        regions.sort(key=lambda x: x.centroid[1])  # same sort as find_inner_holes_contours
+        particle_areas = {idx + 1: r.area for idx, r in enumerate(regions)}
 
         # === 4. Measure Intensity on ch01 ===
         print("  4. Measuring intensity on ch01...")
@@ -128,6 +159,7 @@ def process_pair(ch00_path, ch01_path):
         compute_circles_intensity(
             brightness_image=raw_ch01,
             circles_data=circles_data,
+            particle_areas=particle_areas,
             csv_path=csv_output,
             overlay_path=vis_01_output
         )

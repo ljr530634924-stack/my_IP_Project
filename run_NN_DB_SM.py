@@ -14,7 +14,7 @@ from measure_intensity import compute_circles_intensity
 
 # --- Configuration ---
 # 设置包含您图像的文件夹
-INPUT_FOLDER = r"D:\Ingenieurpraixs\test_45-60min"
+INPUT_FOLDER = r"D:\Ingenieurpraixs\test_12032026"
 SAVE_DEBUG_IMAGES = True # Set to True to save intermediate debug images
 
 # --- Parameters for Structure Extraction (Copied from batch_run_NN_DB_4c.py) ---

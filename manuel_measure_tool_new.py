@@ -15,12 +15,13 @@ except ImportError:
 import glob
 
 # --- Configuration ---
-MEASURE_RADIUS = 70       # 原图上的测量半径 (像素)
+MEASURE_RADIUS = 70       # 原图上的测量外圆半径 (像素)
+DEFAULT_PERCENTAGE = 0.5  # 内圆半径相对于外圆半径的默认比例
 
 class ManualMeasurer:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Manual Measurement Tool (File List & Auto-Save)")
+        self.root.title("Manual Measurement Tool (Annular Ring)")
         self.root.geometry("1200x800")
 
         # Data
@@ -38,7 +39,8 @@ class ManualMeasurer:
         self.raw_w = 0
         self.raw_h = 0
 
-        self.measure_radius = MEASURE_RADIUS
+        self.measure_radius = MEASURE_RADIUS        # 外圆半径
+        self.percentage = DEFAULT_PERCENTAGE        # 内圆半径 / 外圆半径
 
         # UI Setup
         self._setup_ui()
@@ -56,10 +58,15 @@ class ManualMeasurer:
         self.scale_zoom.set(1.0)
         self.scale_zoom.pack(side=tk.LEFT, padx=5)
 
-        tk.Label(toolbar, text="Radius:").pack(side=tk.LEFT, padx=5)
+        tk.Label(toolbar, text="Outer Radius:").pack(side=tk.LEFT, padx=5)
         self.scale_radius = tk.Scale(toolbar, from_=10, to=200, orient=tk.HORIZONTAL, command=self.on_radius_change)
         self.scale_radius.set(self.measure_radius)
         self.scale_radius.pack(side=tk.LEFT, padx=5)
+
+        tk.Label(toolbar, text="Inner/Outer (%):").pack(side=tk.LEFT, padx=5)
+        self.scale_percentage = tk.Scale(toolbar, from_=0, to=99, orient=tk.HORIZONTAL, command=self.on_percentage_change)
+        self.scale_percentage.set(int(self.percentage * 100))
+        self.scale_percentage.pack(side=tk.LEFT, padx=5)
 
         btn_undo = tk.Button(toolbar, text="Undo (Right Click)", command=self.undo_point)
         btn_undo.pack(side=tk.LEFT, padx=5)
@@ -192,12 +199,11 @@ class ManualMeasurer:
 
         # 自动加载第一张
         self.load_image_file(self.image_files[0])
-        
+
         # 在列表中选中第一项
         self.lst_files.selection_clear(0, tk.END)
         self.lst_files.selection_set(0)
         self.lst_files.see(0)
-
 
     def load_image_file(self, file_path):
         """加载单张图片的实际逻辑"""
@@ -254,14 +260,9 @@ class ManualMeasurer:
 
     def normalize_image(self, img):
         """将 16-bit 或任意图像归一化到 0-255 (8-bit) 并转为 RGB 用于显示"""
-        # 优化：先降采样计算百分位数，避免全图转 float32 爆内存
-        # 步长取 10，相当于只用 1/100 的像素计算统计值，速度快且内存低
         subsample = img[::10, ::10]
         vmin, vmax = np.percentile(subsample, (1, 99))
 
-        # 使用 OpenCV 的 convertScaleAbs 进行快速线性变换和转 8-bit
-        # 公式: dst = src * alpha + beta
-        # 我们想要: (x - vmin) / (vmax - vmin) * 255
         if vmax > vmin:
             alpha = 255.0 / (vmax - vmin)
             beta = -vmin * alpha
@@ -271,7 +272,6 @@ class ManualMeasurer:
 
         img_8u = cv2.convertScaleAbs(img, alpha=alpha, beta=beta)
 
-        # 转为 RGB (PIL 需要 RGB)
         if img_8u.ndim == 2:
             img_rgb = cv2.cvtColor(img_8u, cv2.COLOR_GRAY2RGB)
         else:
@@ -286,103 +286,110 @@ class ManualMeasurer:
         self.measure_radius = int(val)
         self.redraw_annotations()
 
+    def on_percentage_change(self, val):
+        self.percentage = int(val) / 100.0
+        self.redraw_annotations()
+
+    def inner_radius(self):
+        """计算内圆半径"""
+        return max(0, int(self.measure_radius * self.percentage))
+
     def refresh_canvas(self):
         if self.vis_ch00 is None:
             return
 
-        # 1. 根据缩放比例调整图像大小
         new_w = int(self.raw_w * self.zoom_level)
         new_h = int(self.raw_h * self.zoom_level)
 
-        # 使用 OpenCV resize 比较快
         resized_ch00 = cv2.resize(self.vis_ch00, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
 
-        # 2. 单图显示，不再拼接
-        # combined = np.hstack((resized_ch00, resized_ch01))
-
-        # 3. 转为 Tkinter 图像
         pil_img = Image.fromarray(resized_ch00)
         self.tk_img = ImageTk.PhotoImage(pil_img)
 
-        # 4. 更新 Canvas
-        self.canvas.delete("all") # 清除所有
+        self.canvas.delete("all")
         self.canvas.create_image(0, 0, image=self.tk_img, anchor="nw")
         self.canvas.config(scrollregion=self.canvas.bbox("all"))
-        
-        # 5. 重绘已选点
+
         self.redraw_annotations()
 
     def redraw_annotations(self):
-        """重绘所有已选点"""
-        self.canvas.delete("overlay") # 清除旧的标记
+        """重绘所有已放置的圆环"""
+        self.canvas.delete("overlay")
 
         scale = self.zoom_level
-        r = self.measure_radius * scale
+        r_outer = self.measure_radius * scale
+        r_inner = self.inner_radius() * scale
 
         for i, (px, py) in enumerate(self.points):
             cx = px * scale
             cy = py * scale
 
-            # 绘制左图圆圈 (ch00)
-            self.canvas.create_oval(cx-r, cy-r, cx+r, cy+r, outline="#00FF00", width=2, tags="overlay")
-            self.canvas.create_text(cx, cy, text=str(i+1), fill="#00FF00", font=("Arial", 12, "bold"), tags="overlay")
+            # 外圆
+            self.canvas.create_oval(cx - r_outer, cy - r_outer, cx + r_outer, cy + r_outer,
+                                    outline="#00FF00", width=2, tags="overlay")
+            # 内圆
+            if r_inner > 0:
+                self.canvas.create_oval(cx - r_inner, cy - r_inner, cx + r_inner, cy + r_inner,
+                                        outline="#00FF00", width=1, dash=(4, 4), tags="overlay")
+            # 编号
+            self.canvas.create_text(cx, cy, text=str(i + 1), fill="#00FF00",
+                                    font=("Arial", 12, "bold"), tags="overlay")
 
     def on_mouse_move(self, event):
-        if self.vis_ch00 is None: return
+        if self.vis_ch00 is None:
+            return
 
-        # 获取 Canvas 坐标 (考虑滚动条偏移)
         canvas_x = self.canvas.canvasx(event.x)
         canvas_y = self.canvas.canvasy(event.y)
 
         scale = self.zoom_level
-        rel_x = canvas_x
+        r_outer = self.measure_radius * scale
+        r_inner = self.inner_radius() * scale
 
-        rel_y = canvas_y
-
-        # 绘制光标预览 (临时)
         self.canvas.delete("cursor")
-        r = self.measure_radius * scale
 
-        # 左侧光标
-        self.canvas.create_oval(rel_x-r, rel_y-r, rel_x+r, rel_y+r, outline="yellow", width=1, tags="cursor")
+        # 外圆预览
+        self.canvas.create_oval(canvas_x - r_outer, canvas_y - r_outer,
+                                canvas_x + r_outer, canvas_y + r_outer,
+                                outline="yellow", width=1, tags="cursor")
+        # 内圆预览
+        if r_inner > 0:
+            self.canvas.create_oval(canvas_x - r_inner, canvas_y - r_inner,
+                                    canvas_x + r_inner, canvas_y + r_inner,
+                                    outline="yellow", width=1, dash=(4, 4), tags="cursor")
 
     def on_left_click(self, event):
-        if self.vis_ch00 is None: return
+        if self.vis_ch00 is None:
+            return
 
-        # 获取 Canvas 坐标
         canvas_x = self.canvas.canvasx(event.x)
         canvas_y = self.canvas.canvasy(event.y)
 
         scale = self.zoom_level
-        rel_x = canvas_x
-
-        # 计算原图坐标
-        raw_x = int(rel_x / scale)
+        raw_x = int(canvas_x / scale)
         raw_y = int(canvas_y / scale)
 
-        # 限制坐标在图像范围内
         raw_x = max(0, min(raw_x, self.raw_w - 1))
         raw_y = max(0, min(raw_y, self.raw_h - 1))
 
         self.points.append((raw_x, raw_y))
         self.redraw_annotations()
-        self.lbl_status.config(text=f"Added point {len(self.points)} at ({raw_x}, {raw_y})")
+        self.lbl_status.config(text=f"Added ring {len(self.points)} at ({raw_x}, {raw_y})")
 
     def undo_point(self):
         if self.points:
             p = self.points.pop()
             self.redraw_annotations()
-            self.lbl_status.config(text=f"Removed point at {p}")
+            self.lbl_status.config(text=f"Removed ring at {p}")
 
     def save_data(self, silent=False):
         if not self.points:
             if not silent:
-                messagebox.showwarning("Warning", "No points selected.")
+                messagebox.showwarning("Warning", "No rings placed.")
             return False
 
         print("Calculating and saving...")
 
-        # --- Lazy Load ch01 just for measurement ---
         if not os.path.exists(self.ch01_path):
             if not silent:
                 messagebox.showerror("Error", "ch01 file missing.")
@@ -393,61 +400,66 @@ class ManualMeasurer:
                 messagebox.showerror("Error", "Failed to load ch01.")
             return False
 
-        # 1. 排序：按 X 轴坐标从小到大
-        # 使用 enumerate 保留原始顺序信息(如果需要)，这里主要按 x 排序
-        # data 结构: {'x': x, 'y': y}
+        r_outer = self.measure_radius
+        r_inner = self.inner_radius()
+        pct = int(self.percentage * 100)
+
+        # 排序：按 X 轴坐标从小到大
         data_list = [{"x": p[0], "y": p[1]} for p in self.points]
         data_list.sort(key=lambda p: p["x"])
 
-        # 2. 准备输出
         results = []
 
-        # 重新加载 ch00 用于画图 (ch00_MC.png)，这次用原分辨率
-        # 注意：normalize_image 返回的是 RGB，OpenCV 保存需要 BGR
         vis_mc = cv2.cvtColor(self.vis_ch00, cv2.COLOR_RGB2BGR)
 
         for idx, item in enumerate(data_list):
             new_id = idx + 1
             cx, cy = item["x"], item["y"]
 
-            # 在 ch01 原图上测量
-            mask = np.zeros(raw_ch01.shape[:2], dtype=np.uint8)
-            cv2.circle(mask, (cx, cy), self.measure_radius, 255, -1)
-            mean_val = cv2.mean(raw_ch01, mask=mask)[0]
+            # 在 ch01 原图上测量圆环区域的平均强度
+            mask_outer = np.zeros(raw_ch01.shape[:2], dtype=np.uint8)
+            cv2.circle(mask_outer, (cx, cy), r_outer, 255, -1)
 
-            results.append([new_id, cx, cy, mean_val])
+            if r_inner > 0:
+                mask_inner = np.zeros(raw_ch01.shape[:2], dtype=np.uint8)
+                cv2.circle(mask_inner, (cx, cy), r_inner, 255, -1)
+                annulus_mask = cv2.subtract(mask_outer, mask_inner)
+            else:
+                annulus_mask = mask_outer
 
-            # 在 ch00_MC 上画图
-            cv2.circle(vis_mc, (cx, cy), self.measure_radius, (0, 255, 0), 4) # 线条粗一点
+            mean_val = cv2.mean(raw_ch01, mask=annulus_mask)[0]
+
+            results.append([new_id, cx, cy, r_outer, r_inner, pct, mean_val])
+
+            # 在可视化图上绘制圆环
+            cv2.circle(vis_mc, (cx, cy), r_outer, (0, 255, 0), 4)
+            if r_inner > 0:
+                cv2.circle(vis_mc, (cx, cy), r_inner, (0, 200, 0), 2)
             cv2.putText(vis_mc, str(new_id), (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 255, 0), 4)
 
-        # Clean up ch01 immediately
         del raw_ch01
         gc.collect()
 
-        # Calculate statistics
-        all_means = [r[3] for r in results]
+        # 统计
+        all_means = [r[6] for r in results]
         global_mean = np.mean(all_means) if all_means else 0
         global_std = np.std(all_means, ddof=1) if len(all_means) > 1 else 0
 
-        # 3. 保存文件
+        # 保存文件
         directory = os.path.dirname(self.ch00_path)
         base_name = os.path.splitext(os.path.basename(self.ch00_path))[0]
 
-        # 保存图片
         mc_path = os.path.join(directory, f"{base_name}_00visualization.png")
         cv2.imwrite(mc_path, vis_mc)
 
-        # 保存 Excel
         excel_path = os.path.join(directory, f"{base_name}_results.xlsx")
         wb = Workbook()
         ws = wb.active
         ws.title = "Manual Measurements"
-        ws.append(["ID", "Center_X", "Center_Y", "Mean_Intensity"])
+        ws.append(["ID", "Center_X", "Center_Y", "Outer_Radius", "Inner_Radius", "Inner_Pct(%)", "Annulus_Mean_Intensity"])
         for row in results:
             ws.append(row)
 
-        # Add footer statistics
         ws.append([])
         ws.append(["Statistics"])
         ws.append(["Global Mean", global_mean])
@@ -465,9 +477,9 @@ class ManualMeasurer:
             pass
 
         if not silent:
-            messagebox.showinfo("Success", f"Saved {len(results)} points.\nCheck folder for _00visualization.png and .xlsx files.")
+            messagebox.showinfo("Success", f"Saved {len(results)} rings.\nCheck folder for _00visualization.png and .xlsx files.")
         else:
-            self.lbl_status.config(text=f"Auto-saved {len(results)} points.")
+            self.lbl_status.config(text=f"Auto-saved {len(results)} rings.")
 
         return True
 

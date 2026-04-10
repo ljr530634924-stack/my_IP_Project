@@ -29,6 +29,22 @@ STRETCH_HIGH_PERCENTILE = 99.5
 SAVE_MASK = False  # Set to True to save the binary structure mask as {prefix}_mask.png
 SAVE_MASK_WITH_AXES = False  # Set to True to save the axes/notch overlay mask as {prefix}_mask_with_axes.png
 
+# Measurement Parameters
+MEASURE_RADIUS = 21        # Fixed measurement outer circle radius (pixels)
+CENTER_OFFSET = 24         # Distance from particle centroid to measurement circle center along each local axis (pixels)
+PERCENTAGE = 0.3           # Inner circle radius as a fraction of outer radius (0.0 - <1.0)
+
+
+def make_annulus_mask(shape, cx, cy, r_outer, r_inner):
+    """Build an annular mask between r_inner and r_outer centered at (cx, cy)."""
+    mask_outer = np.zeros(shape[:2], dtype=np.uint8)
+    cv2.circle(mask_outer, (cx, cy), r_outer, 255, -1)
+    if r_inner > 0:
+        mask_inner = np.zeros(shape[:2], dtype=np.uint8)
+        cv2.circle(mask_inner, (cx, cy), r_inner, 255, -1)
+        return cv2.subtract(mask_outer, mask_inner)
+    return mask_outer
+
 
 def process_pair(ch00_path, ch01_path):
     print(f"Processing pair:\n  CH00: {os.path.basename(ch00_path)}\n  CH01: {os.path.basename(ch01_path)}")
@@ -138,8 +154,8 @@ def process_pair(ch00_path, ch01_path):
                 if os.path.exists(temp_axes_path):
                     os.remove(temp_axes_path)
 
-        # 3. Measure on raw ch01 using measurement circles
-        print("  3. Measuring intensities...")
+        # 3. Measure on raw ch01 using annulus measurement circles
+        print("  3. Measuring intensities (with ring)...")
         raw_ch01 = cv2.imread(ch01_path, cv2.IMREAD_UNCHANGED)
         if raw_ch01 is None:
             print(f"  [ERROR] Cannot read {ch01_path}")
@@ -149,14 +165,35 @@ def process_pair(ch00_path, ch01_path):
         from skimage import measure
         regions = measure.regionprops(labels)
 
-        compute_quadrant_intensity(
+        circles_to_draw = compute_quadrant_intensity(
             brightness_image=raw_ch01,
             labels=labels,
             regions=regions,
             axes_info=axes_info,
             csv_path=csv_output,
             id_map_path=id_map_output,
+            inner_ratio=PERCENTAGE,
+            measure_radius=MEASURE_RADIUS,
+            center_offset=CENTER_OFFSET,
         )
+
+        # 4. Overlay measurement circles onto visualization
+        overlay_output = os.path.join(directory, f"{prefix}_visualization.png")
+        if circles_to_draw and os.path.exists(overlay_output):
+            print("  4. Drawing measurement circles on visualization...")
+            vis_img = cv2.imread(overlay_output)
+            if vis_img is not None:
+                for circ in circles_to_draw:
+                    cx, cy = circ["center"]
+                    r_outer = circ["radius"]
+                    color = circ["color"]
+                    r_inner = max(1, int(round(r_outer * PERCENTAGE)))
+                    # Outer arc circle
+                    cv2.circle(vis_img, (cx, cy), r_outer, color, 1, cv2.LINE_AA)
+                    # Inner arc circle
+                    cv2.circle(vis_img, (cx, cy), r_inner, color, 1, cv2.LINE_AA)
+                cv2.imwrite(overlay_output, vis_img)
+                print(f"  -> Updated visualization with circles: {overlay_output}")
 
         print(f"  -> Done. Results: {csv_output}")
 
@@ -165,12 +202,12 @@ def process_pair(ch00_path, ch01_path):
         import traceback
         traceback.print_exc()
 
-def run_batch_wn_mc(input_folder):
+def run_batch_wn_mc_wr(input_folder):
     """
-    Main entry point for running the batch WN_MC analysis.
+    Main entry point for running the batch WN_MC (With Ring) analysis.
     :param input_folder: The path to the folder containing image pairs.
     """
-    print(f"=== Starting Batch WN MC Analysis in '{os.path.abspath(input_folder)}' ===")
+    print(f"=== Starting Batch WN MC (With Ring) Analysis in '{os.path.abspath(input_folder)}' ===")
 
     search_pattern = os.path.join(input_folder, "*ch00*.tif")
     ch00_files = glob.glob(search_pattern)
@@ -199,10 +236,10 @@ def run_batch_wn_mc(input_folder):
 
 if __name__ == "__main__":
     # This block allows the script to be run standalone for testing.
-    # The GUI will call the `run_batch_wn_mc` function directly.
-    DEFAULT_INPUT_FOLDER = r"D:\Ingenieurpraixs\Test_2.3.2"
+    # The GUI will call the `run_batch_wn_mc_wr` function directly.
+    DEFAULT_INPUT_FOLDER = r"D:\Ingenieurpraixs\test_WN_WR"
     if not os.path.isdir(DEFAULT_INPUT_FOLDER):
         print(f"[ERROR] Default test folder not found: {DEFAULT_INPUT_FOLDER}")
         print("Please update the DEFAULT_INPUT_FOLDER path in the script.")
     else:
-        run_batch_wn_mc(DEFAULT_INPUT_FOLDER)
+        run_batch_wn_mc_wr(DEFAULT_INPUT_FOLDER)

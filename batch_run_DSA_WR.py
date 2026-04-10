@@ -27,16 +27,17 @@ ROI_DIAMETER_RATIO = 0.85  # ROI diameter ratio relative to the shorter side of 
 # Signal Detection Parameters (Based on enhanced ch01 image)
 THRESHOLD_RATIO = 0.6      # Threshold ratio (0.0-1.0)
 MIN_AREA = 1000            # Minimum area to keep a signal
-MAX_AREA = 20000           # Maximum area to keep a signal (Increased to match run_DSA)
+MAX_AREA = 20000           # Maximum area to keep a signal
 MIN_CIRCULARITY = 0.4      # Minimum circularity (0.0 - 1.0)
 SMOOTHING_RADIUS = 3       # Smoothing radius for morphological opening
 
 # Measurement Parameters (Based on raw ch01 image)
-MEASURE_RADIUS = 38       # Fixed measurement circle radius
+MEASURE_RADIUS = 38     # Fixed measurement outer circle radius
+PERCENTAGE = 0.4           # Inner circle radius as a fraction of outer radius (0.0 - <1.0)
 
 # Post-processing Filters
-REMOVE_OVERLAPPING = False          # Remove overlapping circles
-ISOLATION_THRESHOLD_RATIO = 0    # Remove circles without neighbors within this distance ratio
+REMOVE_OVERLAPPING = False
+ISOLATION_THRESHOLD_RATIO = 0
 # Visualization
 FONT_SCALE = 0.8
 
@@ -54,36 +55,49 @@ def calculate_circularity(area, perimeter):
     if perimeter == 0: return 0
     return 4 * np.pi * area / (perimeter * perimeter)
 
-def save_results(measurements, output_path):
+def make_annulus_mask(shape, cx, cy, r_outer, r_inner):
+    """Build an annular mask between r_inner and r_outer centered at (cx, cy)."""
+    mask_outer = np.zeros(shape[:2], dtype=np.uint8)
+    cv2.circle(mask_outer, (cx, cy), r_outer, 255, -1)
+    if r_inner > 0:
+        mask_inner = np.zeros(shape[:2], dtype=np.uint8)
+        cv2.circle(mask_inner, (cx, cy), r_inner, 255, -1)
+        return cv2.subtract(mask_outer, mask_inner)
+    return mask_outer
+
+def save_results(measurements, output_path, r_outer, r_inner, pct):
     if not measurements:
         return
 
     all_means = [m["mean_intensity"] for m in measurements]
     global_avg = np.mean(all_means) if all_means else 0
     global_std = np.std(all_means) if all_means else 0
-    
-    headers = ["Signal_ID", "Centroid_X", "Centroid_Y", "Contour_Area", "Circularity", "Mean_Intensity"]
-    
+
+    headers = [
+        "Signal_ID", "Centroid_X", "Centroid_Y", "Contour_Area", "Circularity",
+        f"Annulus_Mean_Intensity (outer={r_outer}, inner={r_inner}, {pct}%)"
+    ]
+
     if HAS_OPENPYXL:
         wb = Workbook()
         ws = wb.active
         ws.title = "Signal Data"
-        
+
         ws.append(headers)
         for cell in ws[1]: cell.font = Font(bold=True)
-            
+
         for m in measurements:
             ws.append([m["id"], m["cx"], m["cy"], m["area"], m["circularity"], m["mean_intensity"]])
-            
+
         ws.append([])
         ws.append(["Summary Statistics"])
         ws.append(["Total Signals", len(measurements)])
         ws.append(["Global Average Intensity", global_avg])
         ws.append(["Std Dev", global_std])
-        
+
         for i in range(4):
             ws[f"A{ws.max_row - i}"].font = Font(bold=True)
-        
+
         wb.save(output_path)
     else:
         with open(output_path, 'w', newline='') as f:
@@ -97,67 +111,58 @@ def save_results(measurements, output_path):
 
 def process_pair(ch00_path, ch01_path):
     print(f"Processing pair:\n  CH00: {os.path.basename(ch00_path)}\n  CH01: {os.path.basename(ch01_path)}")
-    
+
     directory = os.path.dirname(ch00_path)
     base_name = os.path.basename(ch00_path)
     name_no_ext = os.path.splitext(base_name)[0]
-    
-    # Create prefix
+
     prefix = name_no_ext.replace("ch00", "")
     prefix = prefix.replace("__", "_").strip(" _")
     if not prefix:
         prefix = "output"
-        
-    # Output paths
+
     csv_output = os.path.join(directory, f"{prefix}_DSA_results.xlsx")
     vis_output = os.path.join(directory, f"{prefix}_DSA_visualization.png")
-    
+
     # --- 1. Prepare Visualization Background (Ch00) ---
-    # Ch00 is used ONLY for visualization background
     ch00_raw = cv2.imread(ch00_path, cv2.IMREAD_UNCHANGED)
     if ch00_raw is None:
         print(f"  [ERROR] Cannot read {ch00_path}")
         return
 
-    # Normalize Ch00 for display (handle 16-bit)
     if ch00_raw.dtype == np.uint16:
         vis_img = (ch00_raw / 256).astype(np.uint8)
     else:
         vis_img = ch00_raw.astype(np.uint8)
-    
+
     if vis_img.ndim == 2:
         vis_img = cv2.cvtColor(vis_img, cv2.COLOR_GRAY2BGR)
 
     # --- 2. Process Ch01 for Signal Detection ---
-    # Enhance Ch01
     temp_adj_path = os.path.join(directory, f"temp_adj_{prefix}.png")
     adjust_ch01_image(
-        ch01_path, 
+        ch01_path,
         temp_adj_path,
-        exposure=1.5,       
+        exposure=1.5,
         brightness=10,
         contrast_gain=1.0,
         stretch_low=20,
         stretch_high=98.5,
         do_stretch=True
     )
-    
+
     adj_img = cv2.imread(temp_adj_path, cv2.IMREAD_GRAYSCALE)
     if adj_img is None:
         print(f"  [ERROR] Failed to read adjusted image: {temp_adj_path}")
         return
 
-    # Create ROI Mask
     roi_mask, roi_center, roi_radius = get_roi_mask(adj_img.shape, ROI_DIAMETER_RATIO)
-    
-    # Draw ROI on visualization (Cyan)
+
     cv2.circle(vis_img, roi_center, roi_radius, (255, 255, 0), 2)
 
-    # Thresholding
     threshold_val = int(THRESHOLD_RATIO * 255)
     _, binary = cv2.threshold(adj_img, threshold_val, 255, cv2.THRESH_BINARY)
-    
-    # Morphology
+
     binary_bool = morphology.remove_small_objects(binary > 0, min_size=MIN_AREA)
     binary_cleaned = (binary_bool.astype(np.uint8) * 255)
     binary_filled = (ndimage.binary_fill_holes(binary_cleaned > 0) * 255).astype(np.uint8)
@@ -167,12 +172,10 @@ def process_pair(ch00_path, ch01_path):
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_size, k_size))
         binary_filled = cv2.morphologyEx(binary_filled, cv2.MORPH_OPEN, kernel)
 
-    # Apply ROI
     binary_roi = cv2.bitwise_and(binary_filled, binary_filled, mask=roi_mask)
-    
-    # Find Contours
+
     contours, _ = cv2.findContours(binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
+
     # --- 3. Filter and Measure ---
     raw_ch01 = cv2.imread(ch01_path, cv2.IMREAD_UNCHANGED)
     if raw_ch01 is None:
@@ -180,28 +183,31 @@ def process_pair(ch00_path, ch01_path):
         if os.path.exists(temp_adj_path): os.remove(temp_adj_path)
         return
 
+    r_outer = MEASURE_RADIUS
+    r_inner = max(0, int(MEASURE_RADIUS * PERCENTAGE))
+    pct = int(PERCENTAGE * 100)
+
     measurements = []
-    
+
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if area < MIN_AREA: continue
         if area > MAX_AREA: continue
-            
+
         perimeter = cv2.arcLength(cnt, True)
         circularity = calculate_circularity(area, perimeter)
-        
+
         if circularity < MIN_CIRCULARITY: continue
-            
+
         M = cv2.moments(cnt)
         if M["m00"] == 0: continue
         cx = int(M["m10"] / M["m00"])
         cy = int(M["m01"] / M["m00"])
-        
-        # Measure on raw Ch01
-        mask_c = np.zeros(raw_ch01.shape[:2], dtype=np.uint8)
-        cv2.circle(mask_c, (cx, cy), MEASURE_RADIUS, 255, -1)
-        mean_val = cv2.mean(raw_ch01, mask=mask_c)[0]
-        
+
+        # Measure annulus on raw Ch01
+        annulus_mask = make_annulus_mask(raw_ch01.shape, cx, cy, r_outer, r_inner)
+        mean_val = cv2.mean(raw_ch01, mask=annulus_mask)[0]
+
         measurements.append({
             "cx": cx,
             "cy": cy,
@@ -241,27 +247,28 @@ def process_pair(ch00_path, ch01_path):
     for i, m in enumerate(final_measurements):
         m['id'] = i + 1
         cx, cy = m['cx'], m['cy']
-        # Draw on Ch00 visualization (Green)
-        cv2.circle(vis_img, (cx, cy), MEASURE_RADIUS, (0, 255, 0), 2)
+        # Draw outer circle and inner circle on visualization
+        cv2.circle(vis_img, (cx, cy), r_outer, (0, 255, 0), 2)
+        if r_inner > 0:
+            cv2.circle(vis_img, (cx, cy), r_inner, (0, 255, 255), 2)
         cv2.putText(vis_img, str(m['id']), (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE, (0, 255, 0), 2)
 
-    save_results(final_measurements, csv_output)
+    save_results(final_measurements, csv_output, r_outer, r_inner, pct)
     cv2.imwrite(vis_output, vis_img)
-    
+
     print(f"  -> Saved results: {os.path.basename(csv_output)}")
     print(f"  -> Saved visualization: {os.path.basename(vis_output)}")
     print(f"  -> Signals found: {len(final_measurements)}")
 
-    # Cleanup
     if os.path.exists(temp_adj_path):
         os.remove(temp_adj_path)
 
 def run_batch_dsa(input_folder):
-    print(f"=== Starting Batch DSA Analysis in '{os.path.abspath(input_folder)}' ===")
-    
+    print(f"=== Starting Batch DSA (With Ring) Analysis in '{os.path.abspath(input_folder)}' ===")
+
     search_pattern = os.path.join(input_folder, "*ch00*.tif")
     ch00_files = glob.glob(search_pattern)
-    
+
     if not ch00_files:
         print(f"No files found matching {search_pattern}")
         return
@@ -273,19 +280,18 @@ def run_batch_dsa(input_folder):
         directory, filename = os.path.split(ch00)
         filename_ch01 = filename.replace("ch00", "ch01")
         ch01 = os.path.join(directory, filename_ch01)
-        
+
         if not os.path.exists(ch01):
             print(f"[WARN] Corresponding ch01 file not found for {filename}. Skipping.")
             continue
-            
+
         process_pair(ch00, ch01)
         count += 1
 
     print(f"\n=== Batch Processing Complete! Processed {count} pairs. ===")
 
 if __name__ == "__main__":
-    # Default for testing
-    INPUT_FOLDER = r"D:\Ingenieurpraixs\test_WNB"
+    INPUT_FOLDER = r"D:\Ingenieurpraixs\test_p3_WR"
     if os.path.exists(INPUT_FOLDER):
         run_batch_dsa(INPUT_FOLDER)
     else:

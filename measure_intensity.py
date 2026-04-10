@@ -11,11 +11,18 @@ def compute_quadrant_intensity(
     axes_info,
     csv_path="quadrant_intensity.csv",
     id_map_path="particle_id_map.png",
+    inner_ratio=0.0,
+    measure_radius=None,
+    center_offset=None,
 ):
     """
-    Per particle: place one sampling circle in each quadrant (radius = minor_axis_length / 2,
-    center offset along ex/ey by the same radius), compute mean intensity inside each circle,
-    and draw IDs + circles onto id_map for visual validation.
+    Per particle: place one sampling circle in each quadrant, compute mean intensity inside
+    the annular region, and draw IDs + circles onto id_map for visual validation.
+
+    measure_radius: fixed outer circle radius in pixels. If None, falls back to minor_axis_length/6.
+    center_offset:  fixed distance from particle centroid to circle center along each local axis (pixels).
+                    If None, falls back to measure_radius (circle edge touches the axis).
+    inner_ratio:    inner circle radius as a fraction of outer radius (0.0 = full circle, 0.3 = ring).
     """
     h, w = brightness_image.shape
 
@@ -85,10 +92,12 @@ def compute_quadrant_intensity(
         ex_rc = _norm(ex_rc)
         ey_rc = _norm(ey_rc)
 
-        radius = float(r.minor_axis_length) / 6
+        radius = float(measure_radius) if measure_radius is not None else float(r.minor_axis_length) / 6
         if radius <= 0:
             results.append([pid, np.nan, np.nan, np.nan, np.nan])
             continue
+
+        offset = float(center_offset) if center_offset is not None else radius
 
         ys, xs = np.where(mask)
         coords = np.stack([ys, xs], axis=1).astype(np.float32)
@@ -98,11 +107,13 @@ def compute_quadrant_intensity(
         quadrant_areas = []
 
         for q_name, (sx, sy) in offsets.items():
-            center = C + ex_rc * (sx * radius) + ey_rc * (sy * radius)
+            center = C + ex_rc * (sx * offset) + ey_rc * (sy * offset)
 
             dy = coords[:, 0] - center[0]
             dx = coords[:, 1] - center[1]
-            in_circle = (dx * dx + dy * dy) <= (radius * radius)
+            dist_sq = dx * dx + dy * dy
+            r_inner = radius * inner_ratio
+            in_circle = (dist_sq <= radius * radius) & (dist_sq >= r_inner * r_inner)
 
             q_vals = vals[in_circle]
             if q_vals.size > 0:
@@ -683,39 +694,38 @@ def compute_circles_intensity(
         while len(areas) < max_circles: areas.append(np.nan)
 
         row = [pid] + means + areas
-        
+
         # [New] 2. 添加粒子面积 (Particle Area)
         if particle_areas is not None and pid in particle_areas:
             row.append(particle_areas[pid])
-            
+
         results.append(row)
 
-    # Prepare Header
+    # Prepare Header (Total_Mean added after stats loop to avoid IndexError)
     header = ["particle_id"]
     for i in range(1, max_circles + 1):
         header.append(f"C{i}_Mean")
     for i in range(1, max_circles + 1):
         header.append(f"C{i}_Area")
-    
+
     # [New] Add Particle Area header
     if particle_areas is not None:
         header.append("Particle_Area")
 
-    # Calculate Stats
+    # Calculate Stats (on columns that exist in data rows)
     mean_row = []
     sd_row = []
     sem_row = []
-    
+
     if results:
         mean_row = ["Mean"]
         sd_row = ["SD"]
         sem_row = ["Std. Error"]
-        
-        # Calculate stats for each data column
+
         for col_idx in range(1, len(header)):
             col_vals = [row[col_idx] for row in results]
             valid_vals = [v for v in col_vals if not np.isnan(v)]
-            
+
             if valid_vals:
                 mean_row.append(round(np.mean(valid_vals), 2))
                 n = len(valid_vals)
@@ -731,10 +741,18 @@ def compute_circles_intensity(
                 sd_row.append(0.0)
                 sem_row.append(0.0)
 
+    # Build footer rows
     footer_rows = []
     if mean_row: footer_rows.append(mean_row)
     if sd_row: footer_rows.append(sd_row)
     if sem_row: footer_rows.append(sem_row)
+
+    # Total Mean row: average of the C1–C4 column means, placed below Std. Error
+    if mean_row:
+        c_means = [mean_row[i] for i in range(1, max_circles + 1)
+                   if isinstance(mean_row[i], (int, float)) and not np.isnan(mean_row[i])]
+        total_mean_val = round(float(np.mean(c_means)), 2) if c_means else np.nan
+        footer_rows.append(["Total Mean", total_mean_val])
     
     # Write Excel
     _write_colored_xlsx(csv_path, header, results, footer_rows=footer_rows)

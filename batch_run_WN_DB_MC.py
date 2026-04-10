@@ -12,21 +12,22 @@ from measure_intensity import compute_quadrant_intensity
 
 # --- Configuration ---
 # Default folder for standalone execution. The GUI will provide its own path.
-SAVE_DEBUG_IMAGES = False  # Set to True to save intermediate debug images
+SAVE_DEBUG_IMAGES = True  # Set to True to save intermediate debug images
 
 # --- Parameters for Dirty Background (DB) Extraction (From run_NN_DB_global.py) ---
 MEDIAN_BLUR_KSIZE = 5       # Kernel size (3, 5, 7). Larger = more smoothing.
 ADAPTIVE_BLOCK_SIZE = 101    # Size of the pixel neighborhood. Must be odd.
 ADAPTIVE_C = -1   # Negative C -> Stricter threshold (reduces fog). Try -2 or -1 if missing particles.
-CLOSING_RADIUS = 3        # Radius for closing.
+CLOSING_RADIUS = 5        # Radius for closing.
 PRE_CLOSING_MIN_AREA = 100 # Remove small noise before closing
-MIN_OBJECT_AREA = 130000    # Minimum area to keep a particle. Lowered from 100k to 10k.
-MAX_OBJECT_AREA = 250000    # Maximum area to keep a particle.
-MAX_OBJECT_AREA_FINAL = 245000 # Final check to remove merged particles
+MIN_OBJECT_AREA = 90000    # [Modified] 大幅降低下限，防止在Step5被误删 (原90000)
+MAX_OBJECT_AREA = 250000    # [Modified] 放宽上限 (原250000)
+MAX_OBJECT_AREA_FINAL = 225000 # [Modified] 同步放宽最终上限(原225000)
 FILL_HOLES = True           # Fill internal holes.
-MIN_CIRCULARITY = 0.5       # Minimum circularity. Lowered to catch irregular shapes.
+MIN_CIRCULARITY = 0.2       # Minimum circularity. Lowered to catch irregular shapes.
 MAX_ASPECT_RATIO = 1.4      # Maximum aspect ratio. Increased to allow slightly elongated particles.
 WATERSHED_MIN_DIST = 15    # Watershed min distance
+USE_WATERSHED = False       # [New] Set to False to disable watershed separation (use simple connectivity)
 
 def extract_structure_adaptive(image_path, save_prefix=None):
     """
@@ -78,10 +79,14 @@ def extract_structure_adaptive(image_path, save_prefix=None):
     mask = morphology.remove_small_objects(mask, min_size=MIN_OBJECT_AREA)
     
     # --- Step 6: Watershed Separation ---
-    labels = separate_particles_watershed(mask, min_distance=WATERSHED_MIN_DIST)
+    if USE_WATERSHED:
+        labels = separate_particles_watershed(mask, min_distance=WATERSHED_MIN_DIST)
+    else:
+        labels = measure.label(mask)
     
     # --- Step 7: Advanced Filtering (Circularity & Aspect Ratio) ---
     regions = measure.regionprops(labels)
+    print(f"  [DB] Found {len(regions)} candidates after watershed. Filtering...")
     final_mask = np.zeros(labels.shape, dtype=np.uint8)
     kept_labels = np.zeros(labels.shape, dtype=np.int32)
     
@@ -99,6 +104,8 @@ def extract_structure_adaptive(image_path, save_prefix=None):
             final_mask[r.coords[:, 0], r.coords[:, 1]] = 255
             kept_labels[r.coords[:, 0], r.coords[:, 1]] = r.label
             kept_count += 1
+        elif kept_count < 5: # [New] 打印前几个被拒绝的粒子信息，方便调试
+            print(f"    [Rejected] Area={r.area}, Circ={circularity:.2f}, AR={aspect_ratio:.2f}")
 
     # --- Boundary Burning: Separate touching particles (划黑线方案) ---
     if kept_count > 0:
@@ -269,7 +276,7 @@ def run_batch_wn_db_mc(input_folder):
 if __name__ == "__main__":
     # This block allows the script to be run standalone for testing.
     # The GUI will call the `run_batch_wn_db_mc` function directly.
-    DEFAULT_INPUT_FOLDER = r"F:\Jinrui\qCAP_QuantaRed_750um\Biotin_4Conc\t45min60min"
+    DEFAULT_INPUT_FOLDER = r"D:\Ingenieurpraixs\test_12032026"  # Please change to your test folder path
     if not os.path.isdir(DEFAULT_INPUT_FOLDER):
         print(f"[ERROR] Default test folder not found: {DEFAULT_INPUT_FOLDER}")
         print("Please update the DEFAULT_INPUT_FOLDER path in the script.")

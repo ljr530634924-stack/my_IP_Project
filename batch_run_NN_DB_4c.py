@@ -12,7 +12,7 @@ from overlay_mask import overlay_mask
 
 # --- Configuration ---
 # Set this to the folder containing your images.
-INPUT_FOLDER = r"D:\Ingenieurpraixs\test_NN_DB_4c"
+INPUT_FOLDER = r"D:\Ingenieurpraixs\test_12032026"  # Please change to your test folder path
 SAVE_DEBUG_INPUTS = True # Set to True to save inputs for debug_holes.py
 
 # --- Parameters for Dirty Background (DB) Extraction (From run_NN_DB_global.py) ---

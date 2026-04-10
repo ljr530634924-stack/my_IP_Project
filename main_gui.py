@@ -3,12 +3,30 @@ from tkinter import filedialog, scrolledtext, messagebox
 import threading
 import sys
 import os
+import multiprocessing
+import subprocess
 
 # 导入您的分析脚本
 # 注意：这些脚本必须在同一目录下
 import batch_run_DSA
 import batch_run_WN_MC
 import batch_run_WN_DB_MC
+import batch_run_WNB_MC
+
+# 定义顶层函数以支持 multiprocessing 序列化启动
+def launch_manual_tool1(path):
+    import manual_measure_tool
+    app = manual_measure_tool.ManualMeasurer()
+    if path and os.path.isdir(path):
+        app.load_from_directory(path)
+    app.run()
+
+def launch_manual_tool2(path):
+    import manual_measure_tool2
+    app = manual_measure_tool2.ManualMeasurer2()
+    if path and os.path.isdir(path):
+        app.load_from_directory(path)
+    app.run()
 
 class AnalysisGUI:
     def __init__(self, root):
@@ -35,7 +53,10 @@ class AnalysisGUI:
         modes = [
             ("DSA (Direct Signal Analysis - for particles without notch)", "DSA"),
             ("WN_MC (for particles with notch + clean background)", "WN_MC"),
-            ("WN_DB_MC (for particles with notch + foggy/noisy backgrounds)", "WN_DB_MC")
+            ("WN_DB_MC (for particles with notch + foggy/noisy backgrounds)", "WN_DB_MC"),
+            ("WNB_MC (for particles with notch and bump + clean background)", "WNB_MC"),
+            ("Manual Tool (Single Point Mode)", "ManualTool1"),
+            ("Manual Tool (4-Quadrant Mode)", "ManualTool2")
         ]
 
         for text, mode in modes:
@@ -65,16 +86,18 @@ class AnalysisGUI:
             self.entry_path.insert(0, folder_selected)
 
     def start_analysis_thread(self):
-        path = self.entry_path.get().strip()
-        if not path:
-            messagebox.showerror("Error", "Please select an input folder first.")
-            return
-        
-        if not os.path.isdir(path):
-            messagebox.showerror("Error", f"The folder does not exist:\n{path}")
-            return
-
         method = self.method_var.get()
+        path = self.entry_path.get().strip()
+        
+        # 仅对批处理模式校验文件夹路径，手动工具可以不选文件夹
+        if not method.startswith("Manual"):
+            if not path:
+                messagebox.showerror("Error", "Please select an input folder first.")
+                return
+            
+            if not os.path.isdir(path):
+                messagebox.showerror("Error", f"The folder does not exist:\n{path}")
+                return
         
         # 锁定按钮防止重复点击
         self.btn_run.config(state="disabled", text="Running... Please Wait", bg="#cccccc")
@@ -93,10 +116,22 @@ class AnalysisGUI:
         try:
             if method == "DSA":
                 batch_run_DSA.run_batch_dsa(path)
+            elif method == "ManualTool1":
+                p = multiprocessing.Process(target=launch_manual_tool1, args=(path,))
+                p.start()
+                self.root.after(0, lambda: messagebox.showinfo("Launched", "Manual Tool (Single Point) has been launched in a new window."))
+                return
+            elif method == "ManualTool2":
+                p = multiprocessing.Process(target=launch_manual_tool2, args=(path,))
+                p.start()
+                self.root.after(0, lambda: messagebox.showinfo("Launched", "Manual Tool (4-Quadrant) has been launched in a new window."))
+                return
             elif method == "WN_MC":
                 batch_run_WN_MC.run_batch_wn_mc(path)
             elif method == "WN_DB_MC":
                 batch_run_WN_DB_MC.run_batch_wn_db_mc(path)
+            elif method == "WNB_MC":
+                batch_run_WNB_MC.run_batch_wnb_mc(path)
             else:
                 print(f"[ERROR] Unknown method selected: {method}")
             
@@ -138,6 +173,7 @@ class TextRedirector(object):
         pass
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     root = tk.Tk()
     app = AnalysisGUI(root)
     root.mainloop()
